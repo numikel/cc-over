@@ -1,0 +1,3 @@
+# Force LF everywhere: Biome formats with LF, and core.autocrlf=true would otherwise
+# check files out as CRLF and fail `biome check` locally and in CI.
+* text=auto eol=lf

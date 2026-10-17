@@ -1,0 +1,4 @@
+{
+	"description": "The claude-over hooks module",
+	"modules": ["./register.ts"]
+}

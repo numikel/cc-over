@@ -1,0 +1,20 @@
+{
+	"name": "cc-over-dev",
+	"private": true,
+	"description": "Dev tooling only. The mod in plugin/ has no dependencies and must not import from node_modules.",
+	"type": "module",
+	"scripts": {
+		"check": "biome check --error-on-warnings .",
+		"fix": "biome check --write --error-on-warnings .",
+		"validate": "claude plugin validate --strict plugin",
+		"test": "claude plugin test plugin",
+		"typecheck": "tsc -p plugin",
+		"drift": "node scripts/check-types-drift.mjs",
+		"test:scripts": "node --test scripts/check-types-drift.test.mjs",
+		"verify": "npm run drift && npm run check && npm run test:scripts && npm run validate && npm test && npm run typecheck"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.15",
+		"typescript": "5.9.3"
+	}
+}

@@ -1,0 +1,78 @@
+name: CI
+
+# Runs the /verify-mod ladder (`npm run verify`: drift, Biome, script tests, validate --strict,
+# plugin test, tsc) with no secret, on Linux and Windows. Channel "pinned" installs the Claude Code
+# version in plugin/.claude-code-version and blocks. Channel "latest" is a drift probe: it never
+# fails push, PR or dispatch runs, and fails a scheduled run only when a ladder gate breaks.
+# The resolved version is exported as CLAUDE_CODE_EXPECTED_VERSION, so check 5 of the drift script
+# (CI mode) asserts the installed `claude --version` and check 6 warns when the pin is behind it.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }}, ${{ matrix.channel }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    continue-on-error: ${{ matrix.channel == 'latest' && github.event_name != 'schedule' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        channel: [pinned, latest]
+    defaults:
+      run:
+        shell: bash
+    env:
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      DISABLE_AUTOUPDATER: "1"
+      CHANNEL: ${{ matrix.channel }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Resolve Claude Code version
+        run: |
+          if [ "$CHANNEL" = "pinned" ]; then
+            V="$(tr -d '[:space:]' < plugin/.claude-code-version)"
+          else
+            V="$(npm view @anthropic-ai/claude-code@latest version | tr -d '[:space:]')"
+          fi
+          if ! printf '%s' "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Could not resolve a Claude Code version for channel $CHANNEL (got '$V')"
+            exit 1
+          fi
+          echo "Claude Code version for channel $CHANNEL: $V"
+          echo "CLAUDE_CODE_EXPECTED_VERSION=$V" >> "$GITHUB_ENV"
+
+      - name: Install dev tools
+        run: npm ci
+
+      - name: Install Claude Code
+        run: |
+          npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_EXPECTED_VERSION}"
+          # Make the global npm shim (claude.cmd on Windows) visible to later steps in bash.
+          echo "$(npm config get prefix)" >> "$GITHUB_PATH"
+
+      - name: Verify
+        run: npm run verify

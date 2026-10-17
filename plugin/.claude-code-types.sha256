@@ -1,0 +1,4 @@
+0cab298516885f406c7762cf83b84334b5f5f02e1207abc79a02d136f518354b  .claude-plugin/types/claude-code-mcp/index.d.ts
+62862034fd84dc311a08b926488ab4f28dc7fd43aab01d84743312d3243bec1b  .claude-plugin/types/claude-code-tools/index.d.ts
+c942d5c8cd8a1e87c58ec0cbdc4dfda6a0399273f42709ae19ccd8225ba4dfea  .claude-plugin/types/claude-code/index.d.ts
+75aed92a02defcb18af89f4d6f834c976945c28b7e09b0090776eb73c90953f2  .claude-plugin/types/tsconfig.json

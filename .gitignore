@@ -1,0 +1,11 @@
+# Personal Claude Code config
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/worktrees/
+.worktrees/
+
+# Tooling
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
