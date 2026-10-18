@@ -10,7 +10,7 @@
 		"test": "claude plugin test plugin",
 		"typecheck": "tsc -p plugin",
 		"drift": "node scripts/check-types-drift.mjs",
-		"test:scripts": "node --test scripts/check-types-drift.test.mjs",
+		"test:scripts": "node --test scripts/check-types-drift.test.mjs && node scripts/acceptance/handoff.mjs --selftest",
 		"verify": "npm run drift && npm run check && npm run test:scripts && npm run validate && npm test && npm run typecheck"
 	},
 	"devDependencies": {
