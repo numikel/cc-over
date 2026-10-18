@@ -10,7 +10,7 @@
 > **Status: first slice (S-01).** One hand-off to one live local session, CLI only. Broadcast, a grouped session list, a persistent status and history are planned (see [Planned](#planned)).
 
 **Sections:**
-[About](#about) · [Planned](#planned) · [Requirements](#requirements) · [Installation](#installation) · [Usage](#usage) · [Composing and cost](#composing-and-cost) · [What leaves your session](#what-leaves-your-session) · [What "passed on" means](#what-passed-on-means) · [Known platform behaviour](#known-platform-behaviour) · [Limits](#limits) · [Project structure](#project-structure) · [Development](#development) · [Continuous integration](#continuous-integration) · [Types first](#types-first-rule-for-the-mods-api) · [License](#license)
+[About](#about) · [Planned](#planned) · [Requirements](#requirements) · [Installation](#installation) · [Usage](#usage) · [Composing and cost](#composing-and-cost) · [What leaves your session](#what-leaves-your-session) · [What "passed on" means](#what-passed-on-means) · [Known platform behaviour](#known-platform-behaviour) · [Limits](#limits) · [Project structure](#project-structure) · [Development](#development) · [Continuous integration](#continuous-integration) · [Types first](#types-first-rule-for-the-mods-api) · [About this repository](#about-this-repository) · [License](#license)
 
 ---
 
@@ -201,6 +201,12 @@ The resolved version is exported as `CLAUDE_CODE_EXPECTED_VERSION`, so the drift
 ## Types-first rule for the mods API
 
 The mods API is newer than most model training data. Do not write hook calls from memory: read `plugin/.claude-plugin/types/` first and take event and method names only from there. The drift checks enforce this mechanically: they keep the types in lockstep with the pinned Claude Code version and fail when the files change without a refreshed manifest.
+
+## About this repository
+
+This repository is a generated mirror. The code is developed in a private repository and published here automatically by CI, so commits on `main` come from `cc-over-mirror[bot]` and carry a `Source-Commit:` line that identifies the source revision.
+
+Please report problems and ideas as issues, not as pull requests: anything merged directly here is overwritten by the next publication.
 
 ## License
 
