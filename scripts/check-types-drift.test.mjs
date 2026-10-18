@@ -94,6 +94,16 @@ describe("baseline", () => {
 	});
 });
 
+describe("check 3: pin and header", () => {
+	it("names the way out and nothing outside the exported files", () => {
+		const paths = baseline();
+		writeFileSync(paths.pinFile, "2.1.999\n");
+		const message = find(run(paths), "FAIL", "3")?.message ?? "";
+		assert.match(message, /--strict-mcp-config/);
+		assert.doesNotMatch(message, /CLAUDE\.md/);
+	});
+});
+
 describe("check 8: content hashes", () => {
 	const typesFile = "claude-code/index.d.ts";
 	const cases = [
@@ -183,6 +193,15 @@ describe("check 7: the file set", () => {
 		const paths = baseline();
 		writeFileSync(paths.hashFile, `${"0".repeat(64)}  ../elsewhere.d.ts\n`, { flag: "a" });
 		assertHas(run(paths), "FAIL", "7");
+	});
+
+	it("accepts a manifest saved with CRLF line endings", () => {
+		const paths = baseline();
+		edit(paths.hashFile, (t) => t.replaceAll("\n", "\r\n"));
+		const outcome = run(paths);
+		assert.equal(outcome.failed, false, describeResults(outcome));
+		assertHas(outcome, "PASS", "7");
+		assertHas(outcome, "PASS", "8");
 	});
 });
 

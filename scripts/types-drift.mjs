@@ -73,7 +73,7 @@ function checkPinAndHeader({ typesDir, pinFile }) {
 		add(
 			"FAIL",
 			"3",
-			`types are for ${written} but the pin is ${pin}. Bump the pin only after refreshing the types and re-reading index.d.ts (CLAUDE.md, "Mods API: typy najpierw", point 4).`,
+			`types are for ${written} but the pin is ${pin}. Bump the pin only after refreshing the types with an interactive \`claude --plugin-dir plugin --strict-mcp-config\` start and re-reading index.d.ts.`,
 		);
 	}
 
@@ -131,7 +131,8 @@ function readManifest(hashFile) {
 	const baseDir = dirname(hashFile);
 	const rows = [];
 	const malformed = [];
-	for (const [index, line] of text.split("\n").entries()) {
+	for (const [index, rawLine] of text.split("\n").entries()) {
+		const line = rawLine.replace(/\r$/, "");
 		if (line === "" && index === text.split("\n").length - 1) continue;
 		const match = line.match(/^([0-9a-f]{64}) {2}(\S.*)$/);
 		if (match) rows.push({ hash: match[1], name: match[2], path: resolve(baseDir, match[2]) });
@@ -228,7 +229,7 @@ export function writeHashes({ typesDir, pinFile, hashFile }) {
 		.map((file) => resolve(file))
 		.filter((file) => file !== ignore)
 		.map((file) => ({ name: toPosix(relative(baseDir, file)), hash: sha256(file) }))
-		.sort((a, b) => (a.name < b.name ? -1 : 1))
+		.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
 		.map((entry) => `${entry.hash}  ${entry.name}`);
 	writeFileSync(hashFile, `${entries.join("\n")}\n`);
 	return { written: true, results, entries };
