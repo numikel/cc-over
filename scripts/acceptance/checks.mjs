@@ -15,10 +15,11 @@ export function allStrings(value) {
 	return found;
 }
 
-// The first lines of a bundle (plugin/hooks/bundle.ts, `render`). The preview carries a
-// `Send: <send-id>` placeholder, so only a delivered bundle has a `sendId` (7 hex characters).
+// The first lines of a bundle (plugin/hooks/bundle.ts, `render`; one grammar for a hand-off and a
+// broadcast). The preview carries a `Send: <send-id>` placeholder, so only a delivered bundle has
+// a `sendId` (7 hex characters).
 const HEADER_RE =
-	/\[claude-over hand-off (ovr-[0-9a-z]+-[0-9a-z]{4})\](?:[ \t]*\r?\n[ \t]*Send: ([0-9a-f]{7})(?![0-9a-z]))?/g;
+	/\[claude-over (?:hand-off|broadcast) (ovr-[0-9a-z]+-[0-9a-z]{4})\](?:[ \t]*\r?\n[ \t]*Send: ([0-9a-f]{7})(?![0-9a-z]))?/g;
 
 export function findHeaders(text) {
 	return [...text.matchAll(HEADER_RE)].map((match) => {
@@ -79,6 +80,62 @@ export function sendVerdict(lines, target) {
 	};
 }
 
+// `/over --status` after the run (phase-3 `statusReport`): a header `HH:MM <intent>` (cut to 60
+// characters with an ellipsis when long) and one line per target. `lines` are the status process's
+// ui_log texts: each is split on newlines and matched with a plugin prefix and the indentation
+// tolerated. The `-p` sender never sees the platform's held warning, so its record for the hold
+// receiver stays 'passed on'. `ackSeen` is whether the run saw the acknowledgement: then the accept
+// receiver must read 'received by'; otherwise 'passed on to' is as good.
+export function statusVerdict(lines, { intent, accept, hold, ackSeen }) {
+	const rows = lines.flatMap((text) => text.split(/\r?\n/));
+	const problems = [];
+	const hasHeader = rows.some((row) => {
+		const body = /\b\d{2}:\d{2} (.+)$/.exec(row)?.[1].trimEnd().replace(/…$/, "").trimEnd();
+		return body !== undefined && body !== "" && intent.startsWith(body);
+	});
+	if (!hasHeader) problems.push(`no header "HH:MM ${intent}" in the status report`);
+	const received = new RegExp(`received by ${escapeRe(accept)}(?![A-Za-z0-9-])`);
+	const passedOn = (name) => new RegExp(`(?<!not )passed on to ${escapeRe(name)}(?![A-Za-z0-9-])`);
+	const acceptOk = rows.some(
+		(row) => received.test(row) || (!ackSeen && passedOn(accept).test(row)),
+	);
+	if (!acceptOk) {
+		problems.push(
+			ackSeen
+				? `no "received by ${accept}" line in the status report`
+				: `no "received by ${accept}" or "passed on to ${accept}" line in the status report`,
+		);
+	}
+	if (!rows.some((row) => passedOn(hold).test(row))) {
+		problems.push(`no "passed on to ${hold}" line in the status report`);
+	}
+	for (const row of rows.filter((r) => r.includes("not passed on"))) {
+		problems.push(`the status report has a refused send: ${row.trim()}`);
+	}
+	return { ok: problems.length === 0, problems };
+}
+
+// The status process resumed the sender's session: its `system/init` must carry the same id.
+// A new id would mean `--resume` in `-p` forked the session, and the report below would be empty
+// for a reason other than the mod's.
+export function resumeVerdict(senderId, statusId) {
+	if (senderId === undefined) {
+		return { ok: false, problems: ["the sender never reported a session id"] };
+	}
+	if (statusId === undefined) {
+		return { ok: false, problems: ["the status process never reported a session id"] };
+	}
+	if (statusId !== senderId) {
+		return {
+			ok: false,
+			problems: [
+				`--resume in -p assigned a new id: sender ${senderId}, status process ${statusId}`,
+			],
+		};
+	}
+	return { ok: true, problems: [] };
+}
+
 // What a receiver that accepts messages saw. The same delivery can show up in several events (the
 // injected message, a quote by the model, the final result), so deliveries are counted by their
 // distinct send ids, and one text with the approval block is enough.
@@ -108,6 +165,51 @@ export function deliveryVerdict(texts, bundleId, { expected = 2 } = {}) {
 	};
 }
 
+// What the receivers of a broadcast saw. `seen` maps a receiver's name to the strings it carried
+// (stream plus transcript). A broadcast has the hand-off's six header lines (plugin/hooks/bundle.ts,
+// `render`), then ONE section, `## Message`, with the intent word for word, and none of the
+// hand-off sections. The same delivery shows up in several strings of a transcript, so only the part
+// of a string from the broadcast's header up to the next `[claude-over ` marker is judged: a
+// hand-off the same receiver got earlier has a `## Summary` that is not this broadcast's.
+export function broadcastVerdict(seen, { accept, note, bundleId, intent }) {
+	if (bundleId === undefined) {
+		return {
+			ok: false,
+			problems: ["no bundle id to look for: the broadcast preview had no header"],
+		};
+	}
+	const header = new RegExp(
+		`\\[claude-over broadcast ${escapeRe(bundleId)}\\][ \\t]*\\r?\\n[ \\t]*Send: [0-9a-f]{7}(?![0-9a-z])`,
+	);
+	const problems = [];
+	for (const name of [accept, note]) {
+		const bodies = (seen[name] ?? []).flatMap((text) => {
+			const start = header.exec(text)?.index;
+			if (start === undefined) return [];
+			const body = text.slice(start);
+			const next = body.indexOf("[claude-over ", 1);
+			return [next === -1 ? body : body.slice(0, next)];
+		});
+		if (bodies.length === 0) {
+			problems.push(`${name} never saw "[claude-over broadcast ${bundleId}]" with a Send: id`);
+			continue;
+		}
+		const hasMessage = bodies.some((body) => {
+			const at = body.indexOf("## Message");
+			return at !== -1 && body.indexOf(intent, at) !== -1;
+		});
+		if (!hasMessage) {
+			problems.push(`${name}: no "## Message" section that holds the intent`);
+		}
+		for (const section of SECTIONS) {
+			if (bodies.some((body) => body.includes(section))) {
+				problems.push(`${name}: a broadcast must not carry "${section}"`);
+			}
+		}
+	}
+	return { ok: problems.length === 0, problems };
+}
+
 // A `-p` receiver's stream carries no text of an injected message (only `command_lifecycle`
 // events), but its transcript does: every string of every JSON line of that file.
 export function transcriptStrings(jsonl) {
@@ -127,6 +229,28 @@ export function holdVerdict(texts) {
 		ok: seen.length === 0,
 		problems: seen.map((h) => `the holding receiver saw ${h.bundleId}`),
 	};
+}
+
+// The acknowledgement the mod's `session.receive` hook intercepts (plugin/hooks/register.ts,
+// `observeAck`; the line is `statusLine` of the `received` status). Two proofs in one verdict:
+// the mod logged `received by <target> (acknowledged)` (only the mod writes `ui_log` events, so a
+// quote by the sender's model cannot fake it), and the sender's model ran no turn of its own
+// since `before` results (`{consumed}` takes the message before the model). `before` is the
+// result count read right after the explicit send steps, which are turns themselves.
+export function ackVerdict(events, target, { before }) {
+	const line = new RegExp(`received by ${escapeRe(target)} \\(acknowledged\\)`);
+	const received = events.filter((e) => e.kind === "ui_log" && line.test(e.text)).length;
+	const extraTurns = Math.max(0, events.filter((e) => e.kind === "result").length - before);
+	const problems = [];
+	if (received === 0) {
+		problems.push(`no "received by ${target} (acknowledged)" line in the sender's log`);
+	}
+	if (extraTurns > 0) {
+		problems.push(
+			`the sender's model ran ${extraTurns} turn(s) after the sends: the acknowledgement was not consumed`,
+		);
+	}
+	return { ok: problems.length === 0, problems, received, extraTurns };
 }
 
 // The platform's delivery warnings reach the sender as system lines of the stream; the sender's

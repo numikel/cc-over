@@ -2,12 +2,22 @@
 // only `$.state`, `$.ui.invalidate` and `$.session.append` itself). Not a test file: `claude plugin
 // test` runs only *.test.ts, and each test file imports this one. Fixtures are anonymised.
 
-import type { On, PaneOpenArgs, RenderSurface, SessionSendResult, UiOpenResult } from "claude-code";
+import type {
+	Args,
+	On,
+	PaneOpenArgs,
+	RenderSurface,
+	SessionRepo,
+	SessionSendResult,
+	UiOpenResult,
+} from "claude-code";
 import { type Engine, type MockClock, mock } from "claude-code/testing";
+import { type RegistryEntry, registryKey } from "../hooks/registry.js";
 
 export const SESSION_ID = "6f1d2c3a-1111-2222-3333-444455556666";
 export const ROOT = "/proj";
 export const NOW = 1_792_274_900_000;
+export const REPO: SessionRepo = { root: ROOT, remote: null, internal: false, name: null };
 export const PRESENTATION = { isFullscreen: false, columns: 80 } as const;
 export const COMPOSER = { kind: "composer" } as const;
 export const START = { cwd: ROOT, surface: "terminal", isInteractive: false } as const;
@@ -40,32 +50,61 @@ export const FORK_TEXT =
 export type Seen = {
 	toasts: string[];
 	logs: string[];
-	registered: { name: string; argumentHint?: string }[];
+	registered: { name: string; argumentHint?: string; description?: string }[];
 	opened: PaneOpenArgs[];
 	closed: string[];
 	forks: string[];
 	sent: { to: unknown; text: string }[];
+	/** Peer messages that got past the mod's `session.receive` hook to the bottom (queued for the model). */
+	received: string[];
 	ran: string[];
+	/** How many times ListAgents was called. */
+	listed: number;
+	/** The shared store as the mod left it: seeded entries plus every `set`, minus every `delete`. */
+	store: Record<string, unknown>;
 	clock: MockClock;
 };
+
+/** A registry entry as another session running the mod would have written it. */
+export function entry(fields: Partial<RegistryEntry> & { sessionId: string }): RegistryEntry {
+	return { v: 1, root: ROOT, lastActivityAt: NOW, updatedAt: NOW, ...fields };
+}
+
+/** The `entries` option for these registry entries, keyed as the mod keys them. */
+export const stored = (...entries: RegistryEntry[]): Record<string, unknown> =>
+	Object.fromEntries(entries.map((e) => [registryKey(e.sessionId), e]));
 
 export type WorldOptions = {
 	refuseRegister?: boolean;
 	rows?: typeof ROWS;
 	/** Rows a second ListAgents call answers (a session closed in between). */
 	rowsAfterFirst?: typeof ROWS;
+	/** How many ListAgents calls answer `rows` before `rowsAfterFirst` takes over (default 1). */
+	listsBeforeChange?: number;
+	/** What the shared `$.store` holds at the start. */
+	entries?: Record<string, unknown>;
+	/** Every `$.store.set` is refused (a full or unwritable store); reads still work. */
+	storeFails?: true;
+	/** `$.session.repo()`: default the repo at ROOT, null for a directory outside git. */
+	repo?: SessionRepo | null;
 	/** What `$.model.fork` answers; default: an answered, well-formed reply. */
 	fork?: unknown;
 	/** `ListAgents` is refused (the tool call throws). */
 	listFails?: true;
 	/** The fork answers only once this settles: the bundle stays "composing" until then. */
 	forkGate?: Promise<void>;
+	/** ListAgents calls after the first `after` ones answer only once this settles (session.start makes the first). */
+	listGate?: { after: number; promise: Promise<void> };
 	/** What `$.session.send` answers; default: delivered. */
 	send?: { isDelivered: boolean; reason?: string };
 	/** Git answers by joined argv; default: GIT. A value `"reject"` makes the call reject. */
 	git?: Record<string, Run | "reject">;
 	/** `$.config.list` rows: the `cc-over.compose` value, or undefined for no row (as in `-p`). */
 	compose?: "fork" | "none";
+	/** `$.config.list` row `cc-over.history`: the toggle's value, or undefined for no row (as in `-p`). */
+	history?: boolean;
+	/** Reading a `history:` key is refused (an unreadable store); other keys still read. */
+	historyReadFails?: true;
 	open?: UiOpenResult;
 	sessionId?: string;
 };
@@ -79,13 +118,41 @@ export function world(on: On, surfaces: readonly RenderSurface[], options: World
 		closed: [],
 		forks: [],
 		sent: [],
+		received: [],
 		ran: [],
+		listed: 0,
+		store: { ...options.entries },
 		clock: mock.clock(on, { now: NOW }),
 	};
 	let listCalls = 0;
 	const git = options.git ?? GIT;
 
+	// Registered before mock.store so it sees each call on the way down (the test's `$` cannot read
+	// the store back): mock.store keeps the state, this mirrors it into `seen.store`.
+	on("store.*", (_$, e, next) => {
+		// A deny, not a throw: a throwing hook is skipped and the store below would still save.
+		if (next.event === "store.set" && options.storeFails) return { deny: "the store is full" };
+		if (next.event === "store.set") {
+			const { key, value } = e as Args<"store.set">;
+			seen.store[key] = value;
+		}
+		if (next.event === "store.delete") delete seen.store[(e as Args<"store.delete">).key];
+		if (
+			next.event === "store.get" &&
+			options.historyReadFails &&
+			(e as Args<"store.get">).key.startsWith("history:")
+		) {
+			return { deny: "the store cannot be read" };
+		}
+		return next(e);
+	});
+	mock.store(on, options.entries);
+	on("session.repo", () => ({ value: "repo" in options ? (options.repo ?? null) : REPO }));
 	on("session.start", (_$, e) => ({ cwd: e.cwd }));
+	// The bottoms of the events the mod only observes: the kit has to have something to answer them.
+	on("turn.start", (_$, e) => ({ turnId: e.turnId }));
+	on("turn.complete", (_$, e) => ({ text: e.answer }));
+	on("classic.SessionStart", () => ({}));
 	on("session.id", () => ({ value: options.sessionId ?? SESSION_ID }));
 	on("session.root", () => ({ value: ROOT }));
 	on("session.surfaces", () => ({ value: surfaces }));
@@ -107,12 +174,16 @@ export function world(on: On, surfaces: readonly RenderSurface[], options: World
 	});
 	on("command.register", (_$, e) => {
 		if (options.refuseRegister) return { deny: "taken by a built-in" };
-		seen.registered.push({ name: e.name, argumentHint: e.argumentHint });
+		seen.registered.push({
+			name: e.name,
+			argumentHint: e.argumentHint,
+			description: e.description,
+		});
 		return { value: { command: e.name } };
 	});
 	on("config.list", () => ({
-		value:
-			options.compose === undefined
+		value: [
+			...(options.compose === undefined
 				? []
 				: [
 						{
@@ -124,13 +195,30 @@ export function world(on: On, surfaces: readonly RenderSurface[], options: World
 							provider: { plugin: "cc-over@inline", tier: "user" as const },
 							isLocked: false,
 						},
-					],
+					]),
+			...(options.history === undefined
+				? []
+				: [
+						{
+							key: "cc-over.history",
+							label: "Sent history",
+							kind: "boolean" as const,
+							value: options.history,
+							provider: { plugin: "cc-over@inline", tier: "user" as const },
+							isLocked: false,
+						},
+					]),
+		],
 	}));
-	on("tool.call", (_$, e) => {
+	on("tool.call", async (_$, e) => {
 		if (options.listFails) return { deny: "ListAgents is not available" };
 		listCalls += 1;
+		seen.listed += 1;
 		const rows =
-			listCalls > 1 && options.rowsAfterFirst ? options.rowsAfterFirst : (options.rows ?? ROWS);
+			listCalls > (options.listsBeforeChange ?? 1) && options.rowsAfterFirst
+				? options.rowsAfterFirst
+				: (options.rows ?? ROWS);
+		if (options.listGate && listCalls > options.listGate.after) await options.listGate.promise;
 		return {
 			result: { listing: LISTING, sections: [{ kind: "sessions", total: rows.length, rows }] },
 			text: e.tool,
@@ -160,6 +248,12 @@ export function world(on: On, surfaces: readonly RenderSurface[], options: World
 	on("session.send", (_$, e) => {
 		seen.sent.push({ to: e.to, text: e.text });
 		return (options.send ?? { isDelivered: true }) as SessionSendResult;
+	});
+	// The bottom of `session.receive`: what reaches it was passed on to the model, what the mod
+	// takes (`consumed`) never does. The kit's own bottom throws, so a test needs this one.
+	on("session.receive", (_$, e) => {
+		seen.received.push(e.text);
+		return { text: e.text };
 	});
 	return seen;
 }
@@ -205,6 +299,47 @@ export const refusedText = (to: string) =>
 	`Cross-session message refused (recipient: @${to}). That session is not accepting cross-session messages (the feature is off there, or a setting or policy there refuses them); it was not delivered.`;
 export const expiredText = (to: string) =>
 	`Cross-session message expired without approval (recipient: @${to}). It was never approved, so it wasn't delivered and nothing is waiting in that session. Claude was told.`;
+// denied and released: wording from the 2.1.310 binary (research.md § 3), not yet measured live.
+export const deniedText = (to: string) =>
+	`Cross-session message denied (recipient: @${to}). The recipient's user declined it; it was not delivered.`;
+export const releasedText = (to: string) =>
+	`Cross-session message released after approval (recipient: @${to}). It was approved and released to that session (final delivery is up to their queue).`;
+export const droppedText = (to: string) =>
+	`Cross-session message was dropped at the recipient session's inbox (recipient: @${to}) and not delivered — it repeated your previous message. Claude was told not to resend right away.`;
+
+const PLURAL_TAILS = {
+	held: "Claude in that session hasn't seen it.",
+	denied: "The recipient's user declined it; it was not delivered.",
+	expired: "It was never approved, so it wasn't delivered and nothing is waiting in that session.",
+	released: "It was approved and released to that session (final delivery is up to their queue).",
+	refused:
+		"That session is not accepting cross-session messages (the feature is off there, or a setting or policy there refuses them); it was not delivered.",
+} as const;
+const PLURAL_VERBS = {
+	held: "held by the receiving session",
+	denied: "denied",
+	expired: "expired without approval",
+	released: "released after approval",
+	refused: "refused",
+} as const;
+
+/**
+ * The batched wording: `messages (N)` and `recipients: @a, @b`. The platform shows at most three
+ * names and then `, …`; `count` is the number of messages and defaults to the number of names.
+ */
+export function pluralText(
+	kind: keyof typeof PLURAL_VERBS | "dropped",
+	names: string[],
+	count: number = names.length,
+): string {
+	const shown = names.slice(0, 3).map((name) => `@${name}`);
+	const list = `${shown.join(", ")}${names.length > 3 ? ", …" : ""}`;
+	const group = `(${names.length === 1 ? "recipient" : "recipients"}: ${list})`;
+	if (kind === "dropped") {
+		return `Cross-session messages (${count}) were dropped at the recipient session's inbox ${group} and not delivered. Claude was told not to resend right away.`;
+	}
+	return `Cross-session messages (${count}) ${PLURAL_VERBS[kind]} ${group}. ${PLURAL_TAILS[kind]}`;
+}
 
 // One row as `session.append` hands it for a platform warning: door `notice`, the engine's own.
 export function noticeRow(text: string, name = "informational", uuid = "row-1") {

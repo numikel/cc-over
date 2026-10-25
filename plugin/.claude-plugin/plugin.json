@@ -1,6 +1,6 @@
 {
 	"name": "cc-over",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Claude Code mod: cross-session handoff bundles",
 	"author": { "name": "numikel" },
 	"userConfig": {
@@ -10,6 +10,12 @@
 			"description": "How /over builds a hand-off bundle. fork: the conversation is summarised by one extra request to the session's model (after the prompt cache expires, that request is billed for the whole conversation prefix again). none: the intent plus git only, no model request.",
 			"default": "fork",
 			"options": ["fork", "none"]
+		},
+		"history": {
+			"type": "boolean",
+			"title": "Sent history",
+			"description": "Keep a preview of each bundle you send (intent, summary, instructions, file paths, targets with their status, times; no Details, diffs or full text) in the plugin store, at most 50 per session and 14 days, and list it in bare /over and /over --history. Off: nothing new is saved and the list is hidden; entries already saved age out on their own.",
+			"default": true
 		}
 	}
 }

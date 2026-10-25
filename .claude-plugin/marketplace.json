@@ -1,0 +1,12 @@
+{
+	"name": "cc-over",
+	"description": "Hand off work between parallel Claude Code sessions with /over.",
+	"owner": { "name": "numikel" },
+	"plugins": [
+		{
+			"name": "cc-over",
+			"source": "./plugin",
+			"description": "Claude Code mod: cross-session handoff bundles"
+		}
+	]
+}

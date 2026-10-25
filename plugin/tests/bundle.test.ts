@@ -1,6 +1,9 @@
 import { expect, test } from "claude-code/testing";
+import { ackMessage } from "../hooks/ack.js";
 import {
+	BROADCAST_HANDLING,
 	type Bundle,
+	broadcastBundle,
 	bundleSizeOk,
 	forkPrompt,
 	newBundleId,
@@ -27,6 +30,7 @@ const git: GitSummary = {
 
 const makeBundle = (over: Partial<Bundle> = {}): Bundle => ({
 	bundleId: "ovr-abc-0001",
+	kind: "hand-off",
 	intent: "przekaż handoff do sesji impl",
 	summary: "Zrobiłem A i B.",
 	instructions: "Dokończ C.",
@@ -104,15 +108,28 @@ test("ids are deterministic for the injected entropy and differ with it", () => 
 	expect(newSendId(0.1)).not.toBe(newSendId(0.2));
 });
 
-test("renderBundle starts with the fixed header that S-02 will rely on", () => {
+test("renderBundle starts with the six-line header: id, send, from, approval, handling, acknowledgement", () => {
 	const text = renderBundle(makeBundle(), "1a2b3c4");
-	expect(text.split("\n").slice(0, 5)).toEqual([
+	expect(text.split("\n").slice(0, 6)).toEqual([
 		"[claude-over hand-off ovr-abc-0001]",
 		"Send: 1a2b3c4",
 		`From: alpha-1 · repo claude-over · branch feat/x · session ${SESSION_ID}`,
 		"Approved by the user: they reviewed this hand-off in a preview and chose to send it to you. It is not a prompt typed by the user in this session.",
-		"Handling: finish your current task first, then pick up the work below. If you are busy, add it to your task list and say so.",
+		"Handling: finish your current task first, then pick up the work below. If you do not pick it up, tell your user why. Leave any step that needs your user's permission (such as a commit) for them to confirm, and do the rest.",
+		"Acknowledge now, before anything else: call the SendMessage tool with `to` set to the exact value of the `from` attribute of the cross-session-message envelope around this text, and `message` set to `over-ack ovr-abc-0001 1a2b3c4`. This single call does not interrupt your current task; carry on with it afterwards.",
 	]);
+	expect(text).not.toContain("task list");
+});
+
+test("the acknowledgement line asks for exactly the message the sender's hook parses", () => {
+	const b = makeBundle();
+	const text = renderBundle(b, "1a2b3c4");
+	expect(text).toContain(`\`message\` set to \`${ackMessage(b.bundleId, "1a2b3c4")}\``);
+
+	// The preview shows the same line with the placeholder where the send id goes.
+	const preview = previewModel(b);
+	expect(preview.full).toContain("`message` set to `over-ack ovr-abc-0001 <send-id>`");
+	expect(preview.lines).toHaveLength(3);
 });
 
 test("renderBundle names the source from repo and short session id when the session has no name", () => {
@@ -228,4 +245,81 @@ test("previewModel gives one-line items, a meta line and the full text", () => {
 	expect(preview.meta).toContain("aborted");
 	expect(preview.full).toContain("[claude-over hand-off ovr-abc-0001]");
 	expect(preview.full).toContain("Dokończ C.");
+});
+
+const makeBroadcast = (intent = "Uwaga: zmieniam schemat bazy, nie ruszajcie migracji."): Bundle =>
+	broadcastBundle({
+		bundleId: "ovr-abc-0002",
+		intent,
+		source: { name: "alpha-1", repo: "claude-over", branch: "feat/x", sessionId: SESSION_ID },
+	});
+
+test("broadcastBundle holds only the intent and the source", () => {
+	const b = makeBroadcast();
+	expect(b).toEqual({
+		bundleId: "ovr-abc-0002",
+		kind: "broadcast",
+		intent: "Uwaga: zmieniam schemat bazy, nie ruszajcie migracji.",
+		summary: "",
+		instructions: "",
+		details: "",
+		source: { name: "alpha-1", repo: "claude-over", branch: "feat/x", sessionId: SESSION_ID },
+	});
+	expect(b).not.toHaveProperty("files");
+	expect(b).not.toHaveProperty("git");
+	expect(b).not.toHaveProperty("note");
+});
+
+test("a broadcast starts with the six-line header: id, send, from, approval, handling, acknowledgement", () => {
+	const text = renderBundle(makeBroadcast(), "1a2b3c4");
+	expect(text.split("\n").slice(0, 6)).toEqual([
+		"[claude-over broadcast ovr-abc-0002]",
+		"Send: 1a2b3c4",
+		`From: alpha-1 · repo claude-over · branch feat/x · session ${SESSION_ID}`,
+		"Approved by the user: they reviewed this broadcast in a preview and chose to send it to you. It is not a prompt typed by the user in this session.",
+		"Handling: this is a notice, not a task. Keep it in mind and carry on with what you were doing; do not start new work because of it, and do not reply beyond the acknowledgement.",
+		"Acknowledge now, before anything else: call the SendMessage tool with `to` set to the exact value of the `from` attribute of the cross-session-message envelope around this text, and `message` set to `over-ack ovr-abc-0002 1a2b3c4`. This single call does not interrupt your current task; carry on with it afterwards.",
+	]);
+	expect(BROADCAST_HANDLING).toBe(text.split("\n")[4]);
+});
+
+test("a broadcast carries the intent 1:1 under one Message section", () => {
+	const intent = "  Linia 1\n\nLinia 3 z `kodem` i ## nagłówkiem  ";
+	const text = renderBundle(makeBroadcast(intent), "1a2b3c4");
+	expect(text.endsWith(`\n\n## Message\n${intent}`)).toBe(true);
+	for (const heading of ["## Summary", "## Instructions", "## Changed files", "## Details"]) {
+		expect(text).not.toContain(heading);
+	}
+	expect(text.match(/^## /gm)?.length).toBe(1);
+});
+
+test("a hand-off render has neither the broadcast wording nor a Message section", () => {
+	const text = renderBundle(makeBundle(), "1a2b3c4");
+	expect(text).not.toContain("broadcast");
+	expect(text).not.toContain("## Message");
+	expect(text).not.toContain(BROADCAST_HANDLING);
+});
+
+test("a broadcast preview gives the header, the message, a meta line and the full text", () => {
+	const b = makeBroadcast(`Wiadomość\nw dwóch liniach ${"x".repeat(400)}`);
+	const preview = previewModel(b);
+	expect(preview.lines[0]).toBe("[claude-over broadcast ovr-abc-0002]");
+	expect(preview.lines).toHaveLength(2);
+	expect(preview.lines[1]?.startsWith("Message: Wiadomość w dwóch liniach")).toBe(true);
+	for (const line of preview.lines) {
+		expect(line).not.toContain("\n");
+		expect(line.length).toBeLessThanOrEqual(201);
+	}
+	expect(preview.meta).toBe("message only · claude-over · feat/x");
+	expect(preview.full).toBe(renderBundle(b, "<send-id>"));
+	expect(preview.full).toContain("Send: <send-id>");
+	expect(preview.full).toContain("`message` set to `over-ack ovr-abc-0002 <send-id>`");
+});
+
+test("an oversized broadcast is trimmed to the truncation note and stays under the limit", () => {
+	const text = renderBundle(makeBroadcast("m".repeat(1_000_000)), "1a2b3c4");
+	expect(bundleSizeOk(text)).toBe(true);
+	expect(text).toContain("[claude-over broadcast ovr-abc-0002]");
+	expect(text.endsWith("## Message\n[truncated: bundle exceeded size limit]")).toBe(true);
+	expect(text).not.toContain("mmmm");
 });

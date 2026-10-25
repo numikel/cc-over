@@ -55,7 +55,7 @@ export function parseCli(argv) {
 			allowPositionals: false,
 			options: {
 				model: { type: "string", default: "haiku" },
-				"max-cost": { type: "string", default: "2" },
+				"max-cost": { type: "string", default: "2.5" },
 				"step-timeout": { type: "string", default: "180" },
 				"hold-wait": { type: "string", default: "120" },
 				claude: { type: "string" },
@@ -108,13 +108,42 @@ export function senderArgs({ pluginDir, model, debugFile, budget }) {
 	];
 }
 
+// The process of step 6: resumes the finished sender's session and runs `/over --status`, a
+// command that takes no turn. Same model, plugin, stream format and `--strict-mcp-config` as the
+// sender; like the sender it sets no permission mode and no tool list, and unlike it takes no
+// stream-json input (the prompt goes right after `-p`) and no debug file. The mod's records live
+// in its `$.store`, so a second process sees what the first one sent.
+export function statusArgs({ pluginDir, model, sessionId, budget }) {
+	return [
+		"-p",
+		"/over --status",
+		"--resume",
+		sessionId,
+		"--output-format",
+		"stream-json",
+		"--verbose",
+		"--strict-mcp-config",
+		"--plugin-dir",
+		pluginDir,
+		"--model",
+		model,
+		"--max-budget-usd",
+		String(budget),
+	];
+}
+
 // A receiver is a throwaway `-p` session named probe-handoff-*, limited to `sleep`, that keeps
-// itself alive in a loop so the sender has somebody to talk to. The prompt goes right after `-p`:
-// `--allowedTools` is variadic and would swallow a positional argument after it.
-export function receiverArgs({ name, mode, model, budget, prompt }) {
+// itself alive in a loop so the sender has somebody to talk to. With `ack` it may also send the
+// acknowledgement the bundle asks for: SendMessage is a deferred tool, so ToolSearch comes with it.
+// The prompt goes right after `-p`: `--allowedTools` is variadic and would swallow a positional
+// argument after it. `--permission-mode default` makes the list a limit: in `auto` (a user's
+// possible default) tools off the list still run, and a probe holding SendMessage could reach a
+// real session. ListAgents is denied outright, so a probe cannot even look one up.
+export function receiverArgs({ name, mode, model, budget, prompt, ack = false }) {
 	if (!isProbeTarget(name))
 		throw new Error(`a receiver must be named ${TARGET_PREFIX}*, got "${name}"`);
 	if (mode !== "accept" && mode !== "hold") throw new Error(`unknown receiver mode "${mode}"`);
+	const tools = ack ? ["Bash(sleep:*)", "SendMessage", "ToolSearch"] : ["Bash(sleep:*)"];
 	return [
 		"-p",
 		prompt,
@@ -122,8 +151,12 @@ export function receiverArgs({ name, mode, model, budget, prompt }) {
 		name,
 		"--settings",
 		JSON.stringify({ crossSessionInbound: mode }),
+		"--permission-mode",
+		"default",
 		"--allowedTools",
-		"Bash(sleep:*)",
+		...tools,
+		"--disallowedTools",
+		"ListAgents",
 		"--model",
 		model,
 		"--max-budget-usd",

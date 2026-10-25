@@ -3,7 +3,16 @@
 // and updates the status. It only observes: every row goes on, whatever it says.
 
 import { expect, mock, test } from "claude-code/testing";
-import { expiredText, heldText, noticeRow, over, refusedText, START, world } from "./support.js";
+import {
+	expiredText,
+	heldText,
+	noticeRow,
+	over,
+	pluralText,
+	refusedText,
+	START,
+	world,
+} from "./support.js";
 
 const MINUTE = 60_000;
 
@@ -98,4 +107,22 @@ test("two open sends to one name: the newest is chosen and the status says it is
 	await $.session.append(noticeRow(heldText("impl")));
 	expect(seen.toasts).toHaveLength(1);
 	expect(seen.toasts[0]).toContain("several sessions share this name");
+});
+
+test("one held line naming two targets of the same name changes both of their records", async ($, on) => {
+	const seen = world(on, []);
+	await $.session.start(START);
+	await over($, "--broadcast heads-up");
+	await over($, "--send impl");
+	await over($, "--send impl");
+
+	await $.session.append(noticeRow(pluralText("held", ["impl", "impl"])));
+	// One record each, not the newest twice: both turn `held`, and nobody is left `passed on`.
+	expect(seen.toasts).toHaveLength(2);
+	seen.logs.length = 0;
+	await over($, "--status");
+	expect(seen.logs.slice(-2)).toEqual([
+		expect.stringMatching(/^ {2}held: impl has not seen it yet/),
+		expect.stringMatching(/^ {2}held: impl has not seen it yet/),
+	]);
 });

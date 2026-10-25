@@ -45,6 +45,7 @@ test("maps rows to targets by name, with status and a note for waiting", () => {
 			type: "interactive",
 			address: "alpha-1",
 			isSendable: true,
+			startedAgo: "12h",
 		},
 		{
 			name: "repo-b | impl | feature-x",
@@ -53,6 +54,7 @@ test("maps rows to targets by name, with status and a note for waiting", () => {
 			type: "interactive",
 			address: "repo-b | impl | feature-x",
 			isSendable: true,
+			startedAgo: "12h",
 		},
 		{
 			name: "repo-a | review | feature-y",
@@ -62,6 +64,7 @@ test("maps rows to targets by name, with status and a note for waiting", () => {
 			address: "repo-a | review | feature-y",
 			isSendable: true,
 			note: "waiting for the user",
+			startedAgo: "2h",
 		},
 	]);
 });
@@ -71,6 +74,67 @@ test("a row without status (a session started seconds ago) is still sendable", (
 	expect(targets).toHaveLength(1);
 	expect(targets[0]?.status).toBeUndefined();
 	expect(targets[0]?.isSendable).toBe(true);
+});
+
+test("a status outside idle/busy/waiting is kept verbatim", () => {
+	const { targets } = targetsFromListAgents(result([row("sh", "1671e0", "shell")]));
+	expect(targets[0]?.status).toBe("shell");
+	expect(targets[0]?.note).toBeUndefined();
+});
+
+const agoOf = (rows: ListAgentsRow[], listing: string) =>
+	Object.fromEntries(
+		targetsFromListAgents(result(rows, listing)).targets.map((t) => [t.ref, t.startedAgo]),
+	);
+
+test("startedAgo is read from the listing line of each target, with or without a status column", () => {
+	expect(
+		agoOf(
+			[
+				row("probe-s01-dup", "e417c4", "busy"),
+				row("alpha-1", "c03940", "idle"),
+				row("probe-s01-refuse", "67ef42"),
+				row("repo-b | impl | feature-x", "ff8294", "idle"),
+				row("repo-a | review | feature-y", "9f271c", "waiting"),
+			],
+			LISTING,
+		),
+	).toEqual({
+		e417c4: "1m",
+		c03940: "12h",
+		"67ef42": "2s",
+		ff8294: "12h",
+		"9f271c": "2h",
+	});
+});
+
+test("startedAgo follows the ref, not the name, when two sessions share a name", () => {
+	const listing = `${LISTING}\n  alpha-1 [c03941]  ·  interactive  ·  busy  ·  started 7m ago`;
+	expect(
+		agoOf([row("alpha-1", "c03940", "idle"), row("alpha-1", "c03941", "busy")], listing),
+	).toEqual({ c03940: "12h", c03941: "7m" });
+});
+
+test("startedAgo needs the whole [ref]: a longer ref with the same prefix is another row", () => {
+	const listing = [
+		"  alpha-1 [c039401]  ·  interactive  ·  idle  ·  started 9d ago",
+		"  alpha-2 [c03940]  ·  interactive  ·  idle  ·  started 3h ago",
+	].join("\n");
+	expect(agoOf([row("alpha-2", "c03940", "idle")], listing)).toEqual({ c03940: "3h" });
+});
+
+test("startedAgo is absent when the listing has no line for the ref or the format changed", () => {
+	const [noLine] = targetsFromListAgents(result([row("ghost", "abcdef", "idle")])).targets;
+	expect(noLine?.startedAgo).toBeUndefined();
+	const reformatted = "  alpha-1 [c03940]  ·  interactive  ·  idle  ·  since 12h";
+	const [changed] = targetsFromListAgents(
+		result([row("alpha-1", "c03940", "idle")], reformatted),
+	).targets;
+	expect(changed?.startedAgo).toBeUndefined();
+	const [noRef] = targetsFromListAgents(
+		result([{ name: "alpha-1", type: "interactive", status: "idle" }]),
+	).targets;
+	expect(noRef?.startedAgo).toBeUndefined();
 });
 
 test("duplicate names are both sendable, addressed as name [ref]", () => {
@@ -125,6 +189,19 @@ test("selfName survives the extra SendMessage paragraph before the header", () =
 	expect(selfName).toBe("probe-s01-sender");
 });
 
+test("selfRef is read from the header, also next to a name with pipes", () => {
+	expect(targetsFromListAgents(result([])).selfRef).toBe("a2f9f3");
+	expect(
+		targetsFromListAgents(
+			result(
+				[],
+				"This session is repo-a | review | feature-y [9f271c] — the name other sessions use.",
+			),
+		).selfRef,
+	).toBe("9f271c");
+	expect(targetsFromListAgents(result([], "")).selfRef).toBeUndefined();
+});
+
 test("selfName keeps pipes and spaces from the name", () => {
 	const { selfName } = targetsFromListAgents(
 		result(
@@ -143,9 +220,13 @@ test("missing header, sections or listing yield an empty result", () => {
 	expect(targetsFromListAgents(result([], "")).selfName).toBeUndefined();
 });
 
-test("selfName is filtered out from targets list if returned in rows", () => {
+test("self session is filtered by selfRef, while a peer sharing selfName stays listed as name [ref]", () => {
 	const { targets } = targetsFromListAgents(
-		result([row("probe-s01-sender", "a2f9f3"), row("other", "111111")]),
+		result([
+			row("probe-s01-sender", "a2f9f3"),
+			row("probe-s01-sender", "222222"),
+			row("other", "111111"),
+		]),
 	);
-	expect(targets.map((t) => t.name)).toEqual(["other"]);
+	expect(targets.map((t) => t.address)).toEqual(["probe-s01-sender [222222]", "other"]);
 });

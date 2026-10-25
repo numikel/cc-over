@@ -55,7 +55,7 @@ declare module 'claude-code' {
         /** Servable media type; inferred from the extension for common types (css/js/json/png/…) — pass explicitly otherwise. */
         contentType?: string
       }> | {}
-      /** The base directory that relative `files` sources resolve against, like a bundler root. It never changes published paths. It is relative to the working directory, or absolute within it or within Claude's scratchpad directory. It requires `files`, except on an Artifact made from a type, where a data `file_path` under it is served at its path relative to it. */
+      /** The base directory that relative `files` sources resolve against, like a bundler root. It never changes the published path of a `files` entry. It is relative to the working directory, or absolute within it or within Claude's scratchpad directory. It requires `files`, except on an Artifact made from a type, where a data `file_path` is served at its path relative to `root`, unless a `files` map entry states its served path. Claude sends it with every such publish, set to the folder that holds the Artifact's files at their served paths. */
       root?: string
       /** publish only: true also pins the published artifact to the person's claude.ai sidebar once it is published. Claude passes it only when the person asked for that. A failed pin never fails the publish, and the result says so. */
       pin?: boolean
@@ -1019,6 +1019,8 @@ declare module 'claude-code' {
       }
       own_files: string[]
       type_files: string[]
+      served_at?: string
+      served_root?: string
       files_written?: {
         path: string
         sha256: string
@@ -1162,6 +1164,10 @@ declare module 'claude-code' {
       }
       own_files?: string[]
       type_files?: string[]
+      served_at?: string
+      served_root?: string
+      new_files?: string[]
+      unchanged_files?: string[]
     } | {
       artifacts: Array<{
         title: string
@@ -1270,6 +1276,7 @@ declare module 'claude-code' {
           tier?: string
         }
         match_of?: number
+        ask_first?: boolean
         types?: {
           title: string
           type_url: string
@@ -1881,6 +1888,8 @@ declare module 'claude-code' {
       }
       own_files: string[]
       type_files: string[]
+      served_at?: string
+      served_root?: string
       files_written?: {
         path: string
         sha256: string
@@ -2024,6 +2033,10 @@ declare module 'claude-code' {
       }
       own_files?: string[]
       type_files?: string[]
+      served_at?: string
+      served_root?: string
+      new_files?: string[]
+      unchanged_files?: string[]
     } | {
       artifacts: Array<{
         title: string
@@ -2132,6 +2145,7 @@ declare module 'claude-code' {
           tier?: string
         }
         match_of?: number
+        ask_first?: boolean
         types?: {
           title: string
           type_url: string
@@ -2743,6 +2757,8 @@ declare module 'claude-code' {
       }
       own_files: string[]
       type_files: string[]
+      served_at?: string
+      served_root?: string
       files_written?: {
         path: string
         sha256: string
@@ -2886,6 +2902,10 @@ declare module 'claude-code' {
       }
       own_files?: string[]
       type_files?: string[]
+      served_at?: string
+      served_root?: string
+      new_files?: string[]
+      unchanged_files?: string[]
     } | {
       artifacts: Array<{
         title: string
@@ -2994,6 +3014,7 @@ declare module 'claude-code' {
           tier?: string
         }
         match_of?: number
+        ask_first?: boolean
         types?: {
           title: string
           type_url: string
@@ -3605,6 +3626,8 @@ declare module 'claude-code' {
       }
       own_files: string[]
       type_files: string[]
+      served_at?: string
+      served_root?: string
       files_written?: {
         path: string
         sha256: string
@@ -3748,6 +3771,10 @@ declare module 'claude-code' {
       }
       own_files?: string[]
       type_files?: string[]
+      served_at?: string
+      served_root?: string
+      new_files?: string[]
+      unchanged_files?: string[]
     } | {
       artifacts: Array<{
         title: string
@@ -3856,6 +3883,7 @@ declare module 'claude-code' {
           tier?: string
         }
         match_of?: number
+        ask_first?: boolean
         types?: {
           title: string
           type_url: string

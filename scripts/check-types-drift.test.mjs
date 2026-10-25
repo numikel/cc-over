@@ -139,11 +139,12 @@ describe("check 8: content hashes", () => {
 
 	it("J: header and pin bumped together still fail on the hash", () => {
 		const paths = baseline();
+		const pin = pinOf(paths);
 		edit(paths.file("claude-code/index.d.ts"), (t) =>
-			t.replace("Claude Code 2.1.302.", "Claude Code 2.1.303."),
+			t.replace(`Claude Code ${pin}.`, "Claude Code 2.1.999."),
 		);
-		writeFileSync(paths.pinFile, "2.1.303\n");
-		const outcome = run(paths, { installed: "2.1.303" });
+		writeFileSync(paths.pinFile, "2.1.999\n");
+		const outcome = run(paths, { installed: "2.1.999" });
 		assertHas(outcome, "PASS", "3");
 		assertHas(outcome, "FAIL", "8");
 	});
@@ -229,7 +230,8 @@ describe("checks 5 and 6: installed CLI", () => {
 
 	it("in CI a malformed expected version fails", () => {
 		const env = { ...ci, CLAUDE_CODE_EXPECTED_VERSION: "latest" };
-		assertHas(run(baseline(), { env, installed: "2.1.302" }), "FAIL", "5");
+		const paths = baseline();
+		assertHas(run(paths, { env, installed: pinOf(paths) }), "FAIL", "5");
 	});
 
 	it("treats CI=1 and CI=TRUE as CI", () => {
@@ -240,7 +242,8 @@ describe("checks 5 and 6: installed CLI", () => {
 	});
 
 	it("in CI without an expected version, the pin is expected and check 6 passes", () => {
-		const outcome = run(baseline(), { env: ci, installed: "2.1.302" });
+		const paths = baseline();
+		const outcome = run(paths, { env: ci, installed: pinOf(paths) });
 		assertHas(outcome, "PASS", "5");
 		assertHas(outcome, "PASS", "6");
 	});

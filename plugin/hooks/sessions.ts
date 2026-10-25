@@ -1,16 +1,17 @@
 // ListAgents result -> sessions the user may pick. Pure: no `$` in this file.
 
-export type TargetStatus = "idle" | "busy" | "waiting";
-
 export type Target = {
 	name: string;
 	ref?: string;
-	status?: TargetStatus;
+	/** The platform's word as listed (`idle`, `busy`, `waiting`, `shell`, ...). */
+	status?: string;
 	type?: string;
 	/** What `$.session.send` gets as `to`: the name, or `name [ref]` when the name repeats. */
 	address: string;
 	isSendable: boolean;
 	note?: string;
+	/** The `<x>` of "started <x> ago" from the listing text (`12h`, `1m`, `23s`). */
+	startedAgo?: string;
 };
 
 // Structural subset of the ListAgents result (claude-code-tools/index.d.ts:4837-4855).
@@ -20,17 +21,37 @@ export type ListAgentsResult = {
 	sections?: { kind?: string; total?: number; rows: ListAgentsRow[] }[];
 };
 
-export type TargetList = { targets: Target[]; hiddenCount: number; selfName?: string };
+export type TargetList = {
+	targets: Target[];
+	hiddenCount: number;
+	selfName?: string;
+	/** This session's own `ref` from the header: the key of its registry entry. */
+	selfRef?: string;
+};
 
 // Only `interactive` was ever observed; the list can also hold cloud and Remote Control
 // sessions, which a local hand-off must not offer (PRD: no delivery beyond one machine).
 const LOCAL_TYPE = "interactive";
 
-const STATUSES: readonly string[] = ["idle", "busy", "waiting"];
-
 // "This session is <name> [<ref>] — ..." (evidence E2). The header may follow an extra
 // paragraph about a missing SendMessage tool, so it is matched on any line.
-const SELF_HEADER = /^This session is (.+?) \[[^\]]+\] — /m;
+const SELF_HEADER = /^This session is (.+?) \[([^\]]+)\] — /m;
+
+function escapeRegExp(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// "  <name> [<ref>]  ·  <type>  ·  [<status>  ·  ]started <x> ago" (evidence § 3): the row is
+// found by its exact "[<ref>]", because names repeat and may hold spaces and pipes. A
+// listing in another format yields undefined rather than a guess.
+function startedAgoOf(listing: string, ref: string | undefined): string | undefined {
+	if (ref === undefined || ref === "") return undefined;
+	const line = new RegExp(
+		`^[ \\t]+[^\\n]*? \\[${escapeRegExp(ref)}\\]  ·  (?:[^\\n]*  ·  )?started (\\S+) ago[ \\t]*$`,
+		"m",
+	);
+	return line.exec(listing)?.[1];
+}
 
 export function targetsFromListAgents(result: ListAgentsResult): TargetList {
 	const rows = (result.sections ?? []).flatMap((section) => section.rows);
@@ -42,7 +63,9 @@ export function targetsFromListAgents(result: ListAgentsResult): TargetList {
 	for (const row of named)
 		nameCounts.set(row.name ?? "", (nameCounts.get(row.name ?? "") ?? 0) + 1);
 
-	const selfName = SELF_HEADER.exec(result.listing ?? "")?.[1];
+	const header = SELF_HEADER.exec(result.listing ?? "");
+	const selfName = header?.[1];
+	const selfRef = header?.[2];
 
 	const targets: Target[] = [];
 	let hiddenCount = 0;
@@ -52,14 +75,18 @@ export function targetsFromListAgents(result: ListAgentsResult): TargetList {
 			continue;
 		}
 		const name = row.name ?? "";
-		if (selfName !== undefined && name === selfName) {
+		const isSelf =
+			selfRef !== undefined && row.ref !== undefined
+				? row.ref === selfRef
+				: selfName !== undefined && name === selfName;
+		if (isSelf) {
 			continue;
 		}
-		const isDuplicate = (nameCounts.get(name) ?? 0) > 1 && row.ref !== undefined;
-		const status =
-			row.status !== undefined && STATUSES.includes(row.status)
-				? (row.status as TargetStatus)
-				: undefined;
+		const isDuplicate =
+			((nameCounts.get(name) ?? 0) > 1 || (selfName !== undefined && name === selfName)) &&
+			row.ref !== undefined;
+		const status = row.status !== undefined && row.status !== "" ? row.status : undefined;
+		const startedAgo = startedAgoOf(result.listing ?? "", row.ref);
 		targets.push({
 			name,
 			...(row.ref !== undefined ? { ref: row.ref } : {}),
@@ -68,8 +95,14 @@ export function targetsFromListAgents(result: ListAgentsResult): TargetList {
 			address: isDuplicate ? `${name} [${row.ref}]` : name,
 			isSendable: true,
 			...(status === "waiting" ? { note: "waiting for the user" } : {}),
+			...(startedAgo !== undefined ? { startedAgo } : {}),
 		});
 	}
 
-	return { targets, hiddenCount, ...(selfName ? { selfName } : {}) };
+	return {
+		targets,
+		hiddenCount,
+		...(selfName ? { selfName } : {}),
+		...(selfRef ? { selfRef } : {}),
+	};
 }

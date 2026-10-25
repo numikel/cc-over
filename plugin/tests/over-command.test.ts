@@ -2,7 +2,7 @@
 // every report go to the transcript log, one line per call; nothing is ever sent unasked.
 
 import { expect, test } from "claude-code/testing";
-import { FORK_TEXT, GIT, over, ROWS, START, world } from "./support.js";
+import { entry, FORK_TEXT, GIT, NOW, over, ROOT, ROWS, START, stored, world } from "./support.js";
 
 test("-p /over <intent> composes from the fork and git, logs the bundle and sends nothing", async ($, on) => {
 	const seen = world(on, []);
@@ -77,9 +77,33 @@ test("without git the files come from the model and are marked unverified", asyn
 
 // ---- usage, --list, --send ----
 
-test("a bare /over, an unknown flag and --send without a target say how to use it, and compose nothing", async ($, on) => {
+test("-p: a bare /over says there is no pane, lists nothing and composes nothing", async ($, on) => {
 	const seen = world(on, []);
 	await over($, "");
+	await over($, "   ");
+	expect(seen.logs).toEqual([
+		"Usage: /over <intent> · /over --no-fork <intent> · /over --broadcast <intent> · /over --list · /over --send <session> · /over --send-repo · /over --status · /over --history [n] (no pane here: give the intent as an argument)",
+		"Usage: /over <intent> · /over --no-fork <intent> · /over --broadcast <intent> · /over --list · /over --send <session> · /over --send-repo · /over --status · /over --history [n] (no pane here: give the intent as an argument)",
+	]);
+	expect(seen.listed).toBe(0);
+	expect(seen.opened).toEqual([]);
+	expect(seen.forks).toEqual([]);
+	expect(seen.sent).toEqual([]);
+});
+
+test("a bare /over whose pane did not open says why, then the usage line", async ($, on) => {
+	const seen = world(on, ["terminal"], { open: { isPlaced: false, reason: "no room" } });
+	await over($, "");
+	expect(seen.logs).toEqual([
+		"the pane did not open (no room)",
+		"Usage: /over <intent> · /over --no-fork <intent> · /over --broadcast <intent> · /over --list · /over --send <session> · /over --send-repo · /over --status · /over --history [n] (no pane here: give the intent as an argument)",
+	]);
+	expect(seen.listed).toBe(0);
+	expect(seen.forks).toEqual([]);
+});
+
+test("an unknown flag and --send without a target say how to use it, and compose nothing", async ($, on) => {
+	const seen = world(on, []);
 	await over($, "--send");
 	await over($, "--bogus x");
 	const log = seen.logs.join("\n");
@@ -90,16 +114,52 @@ test("a bare /over, an unknown flag and --send without a target say how to use i
 	expect(seen.sent).toEqual([]);
 });
 
-test("--list shows the local sessions and counts the hidden ones, with no model and no send", async ($, on) => {
-	const seen = world(on, []);
+test("--list prints every group unfolded, each row led by `● <address>`, and counts the hidden ones, with no model and no send", async ($, on) => {
+	const seen = world(on, [], {
+		entries: stored(
+			entry({
+				sessionId: "impl-id",
+				ref: "c03940",
+				repoRoot: ROOT,
+				branch: "main",
+				lastActivityAt: NOW - 5_000,
+			}),
+			entry({
+				sessionId: "review-id",
+				ref: "9f271c",
+				root: "/other/lib",
+				repoRoot: "/other/lib",
+				branch: "dev",
+				lastActivityAt: NOW - 120_000,
+			}),
+		),
+		rows: [...ROWS, { name: "bare", ref: "bb0001", type: "interactive", status: "waiting" }],
+	});
 	expect(await over($, "--list")).toEqual({});
-	const log = seen.logs.join("\n");
-	expect(log).toContain("impl · idle");
-	expect(log).toContain("repo-a | review · busy");
-	expect(log).not.toContain("cloud-1");
-	expect(log).toContain("hidden: 1");
+	expect(seen.logs).toEqual([
+		"This project: proj",
+		"● impl · main · idle · 5s ago",
+		"Other sessions: lib",
+		"● repo-a | review · dev · busy · 2m ago",
+		"Other sessions: no details (mod not running there)",
+		"● bare · waiting · waiting for the user",
+		"hidden: 1 (not a local interactive session)",
+	]);
 	expect(seen.forks).toEqual([]);
 	expect(seen.sent).toEqual([]);
+});
+
+test("--list says when nobody else works in this project, and shows sessions without the mod with their start", async ($, on) => {
+	const seen = world(on, []);
+	await over($, "--list");
+	expect(seen.logs).toEqual([
+		"This project: proj",
+		"● (no other session in this project)",
+		"Other sessions: no details (mod not running there)",
+		"● impl · idle · started 12h ago",
+		"● repo-a | review · busy · started 2h ago",
+		"hidden: 1 (not a local interactive session)",
+	]);
 });
 
 test("--send without a composed bundle sends nothing", async ($, on) => {
@@ -126,6 +186,11 @@ test("--send hands the last bundle to the named session; the same bundle sent tw
 	expect(id(first)).toMatch(/^[0-9a-f]{7}$/);
 	expect(id(first)).not.toBe(id(second));
 	expect(bundle(first)).toBe(bundle(second));
+	// The acknowledgement the recipient is asked for names this very send, not the bundle alone.
+	const ackAsked = (text: string | undefined) =>
+		/`message` set to `over-ack (\S+) (\S+)`/.exec(text ?? "")?.slice(1);
+	expect(ackAsked(first)).toEqual([bundle(first), id(first)]);
+	expect(ackAsked(second)).toEqual([bundle(second), id(second)]);
 	expect(seen.logs.join("\n")).toContain("passed on to impl (queued)");
 });
 
@@ -200,4 +265,144 @@ test("when the bundle cannot be composed the command says why instead of failing
 	expect(seen.sent).toEqual([]);
 	await over($, "--send impl");
 	expect(seen.logs.join("\n")).toContain("compose a bundle first");
+});
+
+// ---- broadcast ----
+
+// impl and the worktree session are of this repo; the third interactive session is not.
+const SAME_REPO = stored(
+	entry({
+		sessionId: "impl-id",
+		ref: "c03940",
+		repoRoot: ROOT,
+		branch: "main",
+		lastActivityAt: NOW - 5_000,
+	}),
+	entry({
+		sessionId: "review-id",
+		ref: "9f271c",
+		root: `${ROOT}/.worktrees/wt-foo`,
+		repoRoot: ROOT,
+		branch: "feat/foo",
+		lastActivityAt: NOW - 120_000,
+	}),
+);
+
+const BROADCAST = "--broadcast heads-up: I am migrating the test database";
+const sendId = (text: string | undefined) => /^Send: (\S+)$/m.exec(text ?? "")?.[1];
+const bundleId = (text: string | undefined) =>
+	/^\[claude-over broadcast (\S+)\]$/m.exec(text ?? "")?.[1];
+
+test("--broadcast previews a broadcast with no fork and one git call, and sends nothing", async ($, on) => {
+	const seen = world(on, []);
+	expect(await over($, BROADCAST)).toEqual({});
+
+	const log = seen.logs.join("\n");
+	expect(log).toMatch(/\[claude-over broadcast ovr-[0-9a-z]+-[0-9a-z]{4}\]/);
+	expect(log).toContain("message only · proj · feat/x");
+	expect(log).toContain("## Message");
+	expect(log).toContain("heads-up: I am migrating the test database");
+	expect(log).not.toContain("## Summary");
+	expect(seen.forks).toEqual([]);
+	// Only the branch is read (by the broadcast and by the session's registry entry): no status, no diff, no log.
+	expect(new Set(seen.ran)).toEqual(new Set(["git rev-parse --abbrev-ref HEAD"]));
+	expect(seen.sent).toEqual([]);
+	expect(seen.logs.every((line) => !line.includes("\n"))).toBe(true);
+});
+
+test("--broadcast without an intent, or with a second flag, says how to use it", async ($, on) => {
+	const seen = world(on, []);
+	await over($, "--broadcast");
+	await over($, "--broadcast --no-fork x");
+	const log = seen.logs.join("\n");
+	expect(log).toContain("--broadcast needs an intent");
+	expect(log).toContain("unknown flag: --no-fork");
+	expect(seen.forks).toEqual([]);
+});
+
+test("each --send adds a target to the same broadcast: two sends, one bundle id, a send id each", async ($, on) => {
+	const seen = world(on, []);
+	await over($, BROADCAST);
+	await over($, "--send impl");
+	await over($, "--send repo-a | review");
+
+	expect(seen.sent.map((sent) => sent.to)).toEqual(["impl", "repo-a | review"]);
+	const [first, second] = seen.sent.map((sent) => sent.text);
+	expect(first).toContain("[claude-over broadcast ovr-");
+	expect(second).toContain("## Message\nheads-up: I am migrating the test database");
+	expect(bundleId(first)).toMatch(/^ovr-/);
+	expect(bundleId(first)).toBe(bundleId(second));
+	expect(sendId(first)).not.toBe(sendId(second));
+});
+
+test("--send-repo sends the broadcast to the sessions of this repo and skips the ones that already have it", async ($, on) => {
+	const seen = world(on, [], { entries: SAME_REPO });
+	await over($, BROADCAST);
+	await over($, "--send impl");
+	seen.logs.length = 0;
+	await over($, "--send-repo");
+
+	expect(seen.sent.map((sent) => sent.to)).toEqual(["impl", "repo-a | review"]);
+	expect(bundleId(seen.sent[0]?.text)).toBe(bundleId(seen.sent[1]?.text));
+	expect(seen.logs).toEqual([
+		"already sent to impl",
+		"passed on to repo-a | review (queued)",
+		"broadcast passed on to 1 of 1 sessions",
+	]);
+
+	// A repeat finds both targets done and sends nothing more.
+	seen.logs.length = 0;
+	await over($, "--send-repo");
+	expect(seen.sent).toHaveLength(2);
+	expect(seen.logs).toEqual(["already sent to impl", "already sent to repo-a | review"]);
+});
+
+test("--send-repo ticks only the sessions of this repo: one of another repo or without the mod gets nothing", async ($, on) => {
+	const seen = world(on, [], {
+		entries: SAME_REPO,
+		rows: [...ROWS, { name: "lib-dev", ref: "d4d4d4", type: "interactive", status: "idle" }],
+	});
+	await over($, BROADCAST);
+	await over($, "--send-repo");
+	expect(seen.sent.map((sent) => sent.to)).toEqual(["impl", "repo-a | review"]);
+});
+
+test("--send-repo says so when no other session of this repo is listed", async ($, on) => {
+	const seen = world(on, []);
+	await over($, BROADCAST);
+	await over($, "--send-repo");
+	expect(seen.sent).toEqual([]);
+	expect(seen.logs.at(-1)).toBe("no other sessions of this repo on the list");
+});
+
+test("--send-repo refuses after a hand-off, and with nothing composed", async ($, on) => {
+	const seen = world(on, [], { entries: SAME_REPO });
+	await over($, "--send-repo");
+	expect(seen.logs.at(-1)).toContain("compose a bundle first");
+
+	await over($, "hand over");
+	await over($, "--send-repo");
+	expect(seen.logs.at(-1)).toBe(
+		"--send-repo sends a broadcast; compose one with /over --broadcast <intent>",
+	);
+	await over($, "--send-repo extra");
+	expect(seen.logs.at(-1)).toContain("--send-repo takes no arguments");
+	expect(seen.sent).toEqual([]);
+});
+
+test("--status heads a broadcast group with `broadcast:`, one line per target", async ($, on) => {
+	const seen = world(on, [], { entries: SAME_REPO });
+	await $.session.start(START);
+	await over($, BROADCAST);
+	await over($, "--send-repo");
+	await over($, "--status");
+	const [heading, ...lines] = seen.logs.slice(-3);
+	expect(heading).toMatch(
+		/^[0-9]{2}:[0-9]{2} broadcast: heads-up: I am migrating the test database$/,
+	);
+	// Both went out in the same millisecond of the mock clock, so only the set of lines is fixed.
+	expect([...lines].sort()).toEqual([
+		"  passed on to impl (queued)",
+		"  passed on to repo-a | review (queued)",
+	]);
 });

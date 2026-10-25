@@ -6,7 +6,7 @@
 	"scripts": {
 		"check": "biome check --error-on-warnings .",
 		"fix": "biome check --write --error-on-warnings .",
-		"validate": "claude plugin validate --strict plugin",
+		"validate": "claude plugin validate --strict plugin && claude plugin validate --strict .",
 		"test": "claude plugin test plugin",
 		"typecheck": "tsc -p plugin",
 		"drift": "node scripts/check-types-drift.mjs",

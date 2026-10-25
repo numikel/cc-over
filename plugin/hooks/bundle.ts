@@ -1,9 +1,14 @@
 // Hand-off bundle: the fork prompt, its parsed reply, and the fixed template that is
 // sent to the recipient. Pure: no `$` in this file.
+import { ackMessage } from "./ack.js";
 import type { GitSummary } from "./git.js";
+
+/** What the user is sending: a full hand-off, or a short notice to several sessions. */
+export type BundleKind = "hand-off" | "broadcast";
 
 export type Bundle = {
 	bundleId: string;
+	kind: BundleKind;
 	intent: string;
 	summary: string;
 	instructions: string;
@@ -162,16 +167,58 @@ function changedFiles(b: Bundle, isTrimmed: boolean): string {
 	return "## Changed files\n(unknown: git was not available)";
 }
 
+const HANDOFF_HANDLING =
+	"Handling: finish your current task first, then pick up the work below. If you do not pick it up, tell your user why. Leave any step that needs your user's permission (such as a commit) for them to confirm, and do the rest.";
+
+export const BROADCAST_HANDLING =
+	"Handling: this is a notice, not a task. Keep it in mind and carry on with what you were doing; do not start new work because of it, and do not reply beyond the acknowledgement.";
+
+/** A broadcast carries only the intent: no summary, instructions, files or git data. */
+export function broadcastBundle(base: {
+	bundleId: string;
+	intent: string;
+	source: Bundle["source"];
+}): Bundle {
+	return {
+		bundleId: base.bundleId,
+		kind: "broadcast",
+		intent: base.intent,
+		summary: "",
+		instructions: "",
+		details: "",
+		source: base.source,
+	};
+}
+
+// Measured wording (S-02 research, variant A: 36/36 acknowledged). A change of words or of
+// position is a new, unmeasured variant.
+const ackLine = (bundleId: string, sendId: string): string =>
+	`Acknowledge now, before anything else: call the SendMessage tool with \`to\` set to the exact value of the \`from\` attribute of the cross-session-message envelope around this text, and \`message\` set to \`${ackMessage(bundleId, sendId)}\`. This single call does not interrupt your current task; carry on with it afterwards.`;
+
+// The header grammar, one for every bundle type; the type changes the word in lines 1 and 4
+// and the whole of line 5:
+//   1. [claude-over <hand-off|broadcast> <bundle-id>]
+//   2. Send: <send-id>
+//   3. From: <name> · repo <repo> · branch <branch> · session <session-id>
+//   4. Approved by the user: … (names the type)
+//   5. Handling: … (the type-specific text: HANDOFF_HANDLING or BROADCAST_HANDLING)
+//   6. the acknowledgement line (the same for both types)
+// scripts/acceptance/checks.mjs reads lines 1 and 2 (`HEADER_RE`).
 function render(b: Bundle, sendId: string, isTrimmed: boolean): string {
 	const { source } = b;
 	const from = source.name ?? `${source.repo}/${source.sessionId.slice(0, 8)}`;
 	const header = [
-		`[claude-over hand-off ${b.bundleId}]`,
+		`[claude-over ${b.kind} ${b.bundleId}]`,
 		`Send: ${sendId}`,
 		`From: ${from} · repo ${source.repo} · branch ${source.branch} · session ${source.sessionId}`,
-		"Approved by the user: they reviewed this hand-off in a preview and chose to send it to you. It is not a prompt typed by the user in this session.",
-		"Handling: finish your current task first, then pick up the work below. If you are busy, add it to your task list and say so.",
+		`Approved by the user: they reviewed this ${b.kind} in a preview and chose to send it to you. It is not a prompt typed by the user in this session.`,
+		b.kind === "broadcast" ? BROADCAST_HANDLING : HANDOFF_HANDLING,
+		ackLine(b.bundleId, sendId),
 	].join("\n");
+
+	if (b.kind === "broadcast") {
+		return [header, `## Message\n${isTrimmed ? TRUNCATED_NOTE : b.intent}`].join("\n\n");
+	}
 
 	const detailParts = isTrimmed
 		? [TRUNCATED_NOTE]
@@ -202,6 +249,13 @@ const oneLine = (label: string, text: string): string => {
 };
 
 export function previewModel(b: Bundle): Preview {
+	if (b.kind === "broadcast") {
+		return {
+			lines: [oneLine("", `[claude-over broadcast ${b.bundleId}]`), oneLine("Message: ", b.intent)],
+			meta: `message only · ${b.source.repo} · ${b.source.branch}`,
+			full: renderBundle(b, "<send-id>"),
+		};
+	}
 	const { git } = b;
 	const files = git
 		? `files: ${git.changes.length + git.truncated} (${

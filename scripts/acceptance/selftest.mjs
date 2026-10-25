@@ -5,14 +5,18 @@
 
 import assert from "node:assert/strict";
 import {
+	ackVerdict,
 	allStrings,
+	broadcastVerdict,
 	composeVerdict,
 	deliveryVerdict,
 	findHeaders,
 	holdVerdict,
 	isProbeTarget,
 	noticeVerdict,
+	resumeVerdict,
 	sendVerdict,
+	statusVerdict,
 	transcriptStrings,
 } from "./checks.mjs";
 import {
@@ -23,6 +27,7 @@ import {
 	runCostOf,
 	senderArgs,
 	shouldStartRun,
+	statusArgs,
 	toEvent,
 	UsageError,
 } from "./lib.mjs";
@@ -33,9 +38,11 @@ const HEADER = [
 	"Send: 3fa9c21",
 	"From: impl · repo demo · branch main · session 0a1b2c3d-0000-4000-8000-000000000000",
 	"Approved by the user: they reviewed this hand-off in a preview and chose to send it to you. It is not a prompt typed by the user in this session.",
-	"Handling: finish your current task first, then pick up the work below.",
+	"Handling: finish your current task first, then pick up the work below. If you do not pick it up, tell your user why. Leave any step that needs your user's permission (such as a commit) for them to confirm, and do the rest.",
+	"Acknowledge now, before anything else: call the SendMessage tool with `to` set to the exact value of the `from` attribute of the cross-session-message envelope around this text, and `message` set to `over-ack ovr-mq1f2k-0a1b 3fa9c21`. This single call does not interrupt your current task; carry on with it afterwards.",
 ].join("\n");
-const SECOND = HEADER.replace("3fa9c21", "b7d0e55");
+// The send id appears twice (the `Send:` line and the acknowledgement line); both change.
+const SECOND = HEADER.replaceAll("3fa9c21", "b7d0e55");
 
 // The compose preview as `-p` logs it: one ui_log line per line (the send id is a placeholder).
 const PREVIEW_LINES = [
@@ -43,6 +50,8 @@ const PREVIEW_LINES = [
 	"[claude-over hand-off ovr-mq1f2k-0a1b]",
 	"Send: <send-id>",
 	"Approved by the user: they reviewed this hand-off in a preview.",
+	"Handling: finish your current task first, then pick up the work below.",
+	"Acknowledge now, before anything else: call the SendMessage tool with `message` set to `over-ack ovr-mq1f2k-0a1b <send-id>`.",
 	"## Summary",
 	"Added the greeting.",
 	"## Instructions",
@@ -50,6 +59,59 @@ const PREVIEW_LINES = [
 	"## Changed files (git, uncommitted changes only)",
 	"- M greeting.txt (uncommitted)",
 ];
+
+const ACCEPT_NAME = "probe-handoff-accept";
+const HOLD_NAME = "probe-handoff-hold";
+const NOTE_NAME = "probe-handoff-note";
+const STATUS_INTENT = "przekaż handoff do sesji, która implementuje zmianę w greeting.txt";
+const STATUS_OPTS = { intent: STATUS_INTENT, accept: ACCEPT_NAME, hold: HOLD_NAME };
+// `/over --status` as `-p` logs it (phase-3 `statusReport`): a header per bundle, then one
+// indented line per target.
+const STATUS_LINES = [
+	`14:02 ${STATUS_INTENT}`,
+	`  received by ${ACCEPT_NAME} (acknowledged)`,
+	`  passed on to ${HOLD_NAME} (queued)`,
+];
+const asQueued = (lines) =>
+	lines.map((line) =>
+		line.replace(
+			`received by ${ACCEPT_NAME} (acknowledged)`,
+			`passed on to ${ACCEPT_NAME} (queued)`,
+		),
+	);
+
+// A broadcast exactly as `renderBundle` writes it (plugin/hooks/bundle.ts, `render`, kind
+// "broadcast"): the same six header lines, then one `## Message` with the intent.
+const BROADCAST_ID = "ovr-mq1f2k-0b2c";
+const BROADCAST_INTENT =
+	"FYI: I'm migrating the test database now; it will be down for about 10 minutes";
+const broadcastWith = (sendId) =>
+	[
+		`[claude-over broadcast ${BROADCAST_ID}]`,
+		`Send: ${sendId}`,
+		"From: impl · repo demo · branch main · session 0a1b2c3d-0000-4000-8000-000000000000",
+		"Approved by the user: they reviewed this broadcast in a preview and chose to send it to you. It is not a prompt typed by the user in this session.",
+		"Handling: this is a notice, not a task. Keep it in mind and carry on with what you were doing; do not start new work because of it, and do not reply beyond the acknowledgement.",
+		`Acknowledge now, before anything else: call the SendMessage tool with \`to\` set to the exact value of the \`from\` attribute of the cross-session-message envelope around this text, and \`message\` set to \`over-ack ${BROADCAST_ID} ${sendId}\`. This single call does not interrupt your current task; carry on with it afterwards.`,
+		"",
+		"## Message",
+		BROADCAST_INTENT,
+	].join("\n");
+const BROADCAST_A = broadcastWith("5ac01de");
+const BROADCAST_B = broadcastWith("9e3b7f2");
+const BROADCAST_OPTS = {
+	accept: ACCEPT_NAME,
+	note: NOTE_NAME,
+	bundleId: BROADCAST_ID,
+	intent: BROADCAST_INTENT,
+};
+// What each receiver carried: the envelope the platform puts around the message, and a stream line.
+const wrapped = (text) =>
+	`<cross-session-message from="uds:x" from-name="impl">\n${text}\n</cross-session-message>`;
+const BROADCAST_SEEN = {
+	[ACCEPT_NAME]: [wrapped(BROADCAST_A), "sleep 15"],
+	[NOTE_NAME]: [BROADCAST_B],
+};
 
 const asEvent = (kind, text, extra = {}) => ({ kind, text, ...extra });
 const eventOf = (obj) => toEvent(parseStreamLine(JSON.stringify(obj)));
@@ -118,8 +180,20 @@ const cases = [
 	[
 		"headers: the preview placeholder gives a bundle id without a send id",
 		() => {
-			const preview = HEADER.replace("Send: 3fa9c21", "Send: <send-id>");
+			const preview = HEADER.replaceAll("3fa9c21", "<send-id>");
 			assert.deepEqual(findHeaders(preview), [{ bundleId: "ovr-mq1f2k-0a1b" }]);
+		},
+	],
+	[
+		"headers: a broadcast header has the same grammar as a hand-off one",
+		() => {
+			const broadcast = HEADER.replace("[claude-over hand-off ", "[claude-over broadcast ");
+			assert.deepEqual(findHeaders(broadcast), [
+				{ bundleId: "ovr-mq1f2k-0a1b", sendId: "3fa9c21" },
+			]);
+			assert.deepEqual(findHeaders(broadcast.replaceAll("3fa9c21", "<send-id>")), [
+				{ bundleId: "ovr-mq1f2k-0a1b" },
+			]);
 		},
 	],
 	[
@@ -242,6 +316,64 @@ const cases = [
 		},
 	],
 	[
+		"ack: a 'received by <target> (acknowledged)' log line with no new sender turn passes",
+		() => {
+			const events = [
+				asEvent("result", "", { numTurns: 1 }),
+				asEvent("result", "", { numTurns: 0 }),
+				asEvent("ui_log", "received by probe-handoff-accept (acknowledged)"),
+				asEvent("ui_log", "received by probe-handoff-accept (acknowledged)"),
+			];
+			const verdict = ackVerdict(events, "probe-handoff-accept", { before: 2 });
+			assert.equal(verdict.ok, true, verdict.problems.join("; "));
+			assert.equal(verdict.received, 2);
+			assert.equal(verdict.extraTurns, 0);
+		},
+	],
+	[
+		"ack: no such line fails, and only the mod's own ui_log lines count",
+		() => {
+			const results = [asEvent("result", ""), asEvent("result", "")];
+			const none = ackVerdict(results, "probe-handoff-accept", { before: 2 });
+			assert.equal(none.ok, false);
+			assert.equal(none.received, 0);
+			assert.match(none.problems.join(), /received by probe-handoff-accept/);
+			// the model quoting the line, or an ack for another target, is not the proof
+			const quoted = [
+				...results,
+				asEvent("assistant", "received by probe-handoff-accept (acknowledged)"),
+				asEvent("ui_log", "received by probe-handoff-hold (acknowledged)"),
+				asEvent("ui_log", "passed on to probe-handoff-accept (queued)"),
+			];
+			assert.equal(ackVerdict(quoted, "probe-handoff-accept", { before: 2 }).ok, false);
+		},
+	],
+	[
+		"ack: a sender turn after the ack means the model got the message and fails",
+		() => {
+			const events = [
+				asEvent("result", ""),
+				asEvent("result", ""),
+				asEvent("ui_log", "received by probe-handoff-accept (acknowledged)"),
+				asEvent("result", ""),
+			];
+			const verdict = ackVerdict(events, "probe-handoff-accept", { before: 2 });
+			assert.equal(verdict.ok, false);
+			assert.equal(verdict.extraTurns, 1);
+			assert.match(verdict.problems.join(), /1 turn/);
+		},
+	],
+	[
+		"ack: a target name with regex characters is matched literally",
+		() => {
+			const dotted = [asEvent("ui_log", "received by probe-handoff-a.b (acknowledged)")];
+			assert.equal(ackVerdict(dotted, "probe-handoff-a.b", { before: 0 }).ok, true);
+			// an unescaped '.' would take the other receiver's line for this one's
+			const other = [asEvent("ui_log", "received by probe-handoff-axb (acknowledged)")];
+			assert.equal(ackVerdict(other, "probe-handoff-a.b", { before: 0 }).ok, false);
+		},
+	],
+	[
 		"cost: the run cost is the largest cumulative figure, never the sum",
 		() => {
 			assert.equal(runCostOf([0.01, 0.04, 0.03]), 0.04);
@@ -262,7 +394,7 @@ const cases = [
 		() => {
 			const config = parseCli([]);
 			assert.equal(config.model, "haiku");
-			assert.equal(config.maxCost, 2);
+			assert.equal(config.maxCost, 2.5);
 			assert.equal(parseCli(["--max-cost", "0.5"]).maxCost, 0.5);
 			assert.throws(() => parseCli(["--max-cost", "abc"]), UsageError);
 			assert.throws(() => parseCli(["--max-cost", "0"]), UsageError);
@@ -302,6 +434,47 @@ const cases = [
 					}),
 				/mode/,
 			);
+		},
+	],
+	[
+		"args: an accepting receiver may acknowledge (SendMessage + ToolSearch); the others may not",
+		() => {
+			const base = { name: "probe-handoff-accept", mode: "accept", model: "haiku", budget: 0.4 };
+			const tools = (args) => {
+				const from = args.indexOf("--allowedTools") + 1;
+				const to = args.findIndex((arg, i) => i >= from && arg.startsWith("--"));
+				return args.slice(from, to);
+			};
+			assert.deepEqual(tools(receiverArgs({ ...base, prompt: "p", ack: true })), [
+				"Bash(sleep:*)",
+				"SendMessage",
+				"ToolSearch",
+			]);
+			assert.deepEqual(tools(receiverArgs({ ...base, prompt: "p" })), ["Bash(sleep:*)"]);
+			// SendMessage is deferred: without ToolSearch the model cannot load it
+			assert.ok(!receiverArgs({ ...base, prompt: "p" }).includes("SendMessage"));
+			// the prompt must stay right after -p: --allowedTools is variadic and swallows it
+			const args = receiverArgs({ ...base, prompt: "the prompt", ack: true });
+			assert.equal(args[args.indexOf("-p") + 1], "the prompt");
+		},
+	],
+	[
+		"args: a receiver runs in default mode, so tools off the list are denied, and cannot list sessions",
+		() => {
+			// In `auto` (the author's default) tools off --allowedTools still run, and a probe with
+			// SendMessage could reach a real session; `default` in `-p` denies them instead.
+			for (const ack of [true, false]) {
+				const args = receiverArgs({
+					name: "probe-handoff-accept",
+					mode: "accept",
+					model: "haiku",
+					budget: 0.4,
+					prompt: "p",
+					ack,
+				});
+				assert.equal(args[args.indexOf("--permission-mode") + 1], "default");
+				assert.equal(args[args.indexOf("--disallowedTools") + 1], "ListAgents");
+			}
 		},
 	],
 	[
@@ -356,10 +529,236 @@ const cases = [
 		},
 	],
 	[
+		"status: the phase-3 report passes (received by accept, passed on to hold, header with the intent)",
+		() => {
+			const verdict = statusVerdict(STATUS_LINES, { ...STATUS_OPTS, ackSeen: true });
+			assert.equal(verdict.ok, true, verdict.problems.join("; "));
+		},
+	],
+	[
+		"status: without an ack seen, 'passed on to <accept>' and 'received by <accept>' both pass",
+		() => {
+			assert.equal(
+				statusVerdict(asQueued(STATUS_LINES), { ...STATUS_OPTS, ackSeen: false }).ok,
+				true,
+			);
+			assert.equal(statusVerdict(STATUS_LINES, { ...STATUS_OPTS, ackSeen: false }).ok, true);
+		},
+	],
+	[
+		"status: with an ack seen, 'passed on to <accept>' is not enough",
+		() => {
+			const verdict = statusVerdict(asQueued(STATUS_LINES), { ...STATUS_OPTS, ackSeen: true });
+			assert.equal(verdict.ok, false);
+			assert.match(verdict.problems.join(), /received by probe-handoff-accept/);
+		},
+	],
+	[
+		"status: a missing hold line fails and names the receiver",
+		() => {
+			const lines = STATUS_LINES.filter((line) => !line.includes(HOLD_NAME));
+			const verdict = statusVerdict(lines, { ...STATUS_OPTS, ackSeen: true });
+			assert.equal(verdict.ok, false);
+			assert.match(verdict.problems.join(), /passed on to probe-handoff-hold/);
+		},
+	],
+	[
+		"status: any 'not passed on' line fails, and is not taken for the hold line",
+		() => {
+			const extra = [...STATUS_LINES, "  not passed on to probe-handoff-x: the session is gone"];
+			const first = statusVerdict(extra, { ...STATUS_OPTS, ackSeen: true });
+			assert.equal(first.ok, false);
+			assert.match(first.problems.join(), /not passed on/);
+			const refused = STATUS_LINES.map((line) =>
+				line.replace(`passed on to ${HOLD_NAME} (queued)`, `not passed on to ${HOLD_NAME}: no`),
+			);
+			const second = statusVerdict(refused, { ...STATUS_OPTS, ackSeen: true });
+			assert.equal(second.ok, false);
+			assert.ok(
+				second.problems.includes('no "passed on to probe-handoff-hold" line in the status report'),
+			);
+		},
+	],
+	[
+		"status: no header with the intent fails (empty report, other intent, no time)",
+		() => {
+			const body = STATUS_LINES.slice(1);
+			for (const lines of [
+				body,
+				["no sends recorded for this session"],
+				["14:02 some other intent", ...body],
+				[STATUS_INTENT, ...body],
+			]) {
+				const verdict = statusVerdict(lines, { ...STATUS_OPTS, ackSeen: true });
+				assert.equal(verdict.ok, false, lines[0]);
+				assert.match(verdict.problems.join(), /header/);
+			}
+		},
+	],
+	[
+		"status: an intent cut to 60 characters with an ellipsis still matches its header",
+		() => {
+			const long = "przekaż handoff do sesji, która implementuje zmianę w greeting.txt i dalej";
+			const opts = { intent: long, accept: ACCEPT_NAME, hold: HOLD_NAME, ackSeen: true };
+			const cut = `${long.slice(0, 59)}…`;
+			assert.equal(statusVerdict([`14:02 ${cut}`, ...STATUS_LINES.slice(1)], opts).ok, true);
+			const other = cut.replace("handoff", "hand-off");
+			assert.equal(statusVerdict([`14:02 ${other}`, ...STATUS_LINES.slice(1)], opts).ok, false);
+		},
+	],
+	[
+		"status: a plugin prefix, indentation and one multi-line log event are tolerated",
+		() => {
+			const opts = { ...STATUS_OPTS, ackSeen: true };
+			const prefixed = STATUS_LINES.map((line) => `cc-over: ${line}`);
+			assert.equal(statusVerdict(prefixed, opts).ok, true);
+			assert.equal(statusVerdict([STATUS_LINES.join("\n")], opts).ok, true);
+		},
+	],
+	[
+		"status: receiver names are matched literally and whole (accept2 is not accept)",
+		() => {
+			const longer = STATUS_LINES.map((line) => line.replace(ACCEPT_NAME, `${ACCEPT_NAME}2`));
+			assert.equal(statusVerdict(longer, { ...STATUS_OPTS, ackSeen: true }).ok, false);
+			const other = STATUS_LINES.map((line) => line.replace(ACCEPT_NAME, "probe-handoff-axb"));
+			const dotted = { ...STATUS_OPTS, accept: "probe-handoff-a.b", ackSeen: true };
+			assert.equal(statusVerdict(other, dotted).ok, false);
+			// control: the exact dotted name does pass, so the negatives above prove something
+			const exact = STATUS_LINES.map((line) => line.replace(ACCEPT_NAME, "probe-handoff-a.b"));
+			assert.equal(statusVerdict(exact, dotted).ok, true);
+		},
+	],
+	[
+		"args: the status process resumes the sender's session and runs /over --status",
+		() => {
+			const args = statusArgs({ pluginDir: "/p", model: "haiku", sessionId: "sid-1", budget: 0.2 });
+			assert.deepEqual(args, [
+				"-p",
+				"/over --status",
+				"--resume",
+				"sid-1",
+				"--output-format",
+				"stream-json",
+				"--verbose",
+				"--strict-mcp-config",
+				"--plugin-dir",
+				"/p",
+				"--model",
+				"haiku",
+				"--max-budget-usd",
+				"0.2",
+			]);
+			// it takes no input and is given no tools to send with
+			assert.ok(!args.includes("--input-format"));
+			assert.ok(!args.includes("--allowedTools"));
+		},
+	],
+	[
+		"resume: the status process must report the sender's own session id",
+		() => {
+			assert.equal(resumeVerdict("sid-1", "sid-1").ok, true);
+			const moved = resumeVerdict("sid-1", "sid-2");
+			assert.equal(moved.ok, false);
+			assert.match(moved.problems.join(), /--resume in -p assigned a new id/);
+			assert.equal(resumeVerdict(undefined, "sid-1").ok, false);
+			assert.equal(resumeVerdict("sid-1", undefined).ok, false);
+		},
+	],
+	[
+		"broadcast: both receivers hold the header, a `## Message` with the intent and no hand-off section",
+		() => {
+			const verdict = broadcastVerdict(BROADCAST_SEEN, BROADCAST_OPTS);
+			assert.equal(verdict.ok, true, verdict.problems.join("; "));
+		},
+	],
+	[
+		"broadcast: a missing header at one receiver fails and names it",
+		() => {
+			for (const lacking of [ACCEPT_NAME, NOTE_NAME]) {
+				const seen = { ...BROADCAST_SEEN, [lacking]: ["sleep 15", "done"] };
+				const verdict = broadcastVerdict(seen, BROADCAST_OPTS);
+				assert.equal(verdict.ok, false, lacking);
+				assert.equal(verdict.problems.length, 1, verdict.problems.join("; "));
+				assert.match(verdict.problems[0], new RegExp(`^${lacking} never saw`));
+			}
+			// no receiver at all in the map is the same failure, not an exception
+			assert.equal(broadcastVerdict({}, BROADCAST_OPTS).problems.length, 2);
+		},
+	],
+	[
+		"broadcast: a `## Summary` in the broadcast fails (a hand-off body does not pass for one)",
+		() => {
+			const withSummary = `${BROADCAST_B}\n\n## Summary\nDo it.`;
+			const verdict = broadcastVerdict(
+				{ ...BROADCAST_SEEN, [NOTE_NAME]: [withSummary] },
+				BROADCAST_OPTS,
+			);
+			assert.equal(verdict.ok, false);
+			assert.match(
+				verdict.problems.join(),
+				/probe-handoff-note: a broadcast must not carry "## Summary"/,
+			);
+			// a hand-off with the same bundle id is not a broadcast: no broadcast header, no pass
+			const handOff = HEADER.replace("ovr-mq1f2k-0a1b", BROADCAST_ID).replace("3fa9c21", "9e3b7f2");
+			const asHandOff = broadcastVerdict(
+				{ ...BROADCAST_SEEN, [NOTE_NAME]: [`${handOff}\n\n## Summary\nDo it.`] },
+				BROADCAST_OPTS,
+			);
+			assert.equal(asHandOff.ok, false);
+			assert.match(asHandOff.problems.join(), /probe-handoff-note never saw/);
+		},
+	],
+	[
+		"broadcast: only the broadcast's own part of a text is judged, in either order with a hand-off",
+		() => {
+			const earlier = `${HEADER}\n\n## Summary\nDo it.\n\n## Instructions\nGo.\n\n${BROADCAST_B}`;
+			const later = `${BROADCAST_B}\n\n---\n${HEADER}\n\n## Summary\nDo it.`;
+			for (const text of [earlier, later]) {
+				const verdict = broadcastVerdict(
+					{ ...BROADCAST_SEEN, [NOTE_NAME]: [text] },
+					BROADCAST_OPTS,
+				);
+				assert.equal(verdict.ok, true, verdict.problems.join("; "));
+			}
+		},
+	],
+	[
+		"broadcast: no `## Message`, another intent, another bundle id or no bundle id fails",
+		() => {
+			const noMessage = BROADCAST_B.replace("## Message", "## Note");
+			assert.match(
+				broadcastVerdict(
+					{ ...BROADCAST_SEEN, [NOTE_NAME]: [noMessage] },
+					BROADCAST_OPTS,
+				).problems.join(),
+				/no "## Message" section that holds the intent/,
+			);
+			const otherIntent = BROADCAST_B.replace(BROADCAST_INTENT, "something else");
+			assert.equal(
+				broadcastVerdict({ ...BROADCAST_SEEN, [NOTE_NAME]: [otherIntent] }, BROADCAST_OPTS).ok,
+				false,
+			);
+			// the intent above the `## Message` heading (in the header) is not the message
+			const intentFirst = `${BROADCAST_INTENT}\n${BROADCAST_B.replace(BROADCAST_INTENT, "")}`;
+			assert.equal(
+				broadcastVerdict({ ...BROADCAST_SEEN, [NOTE_NAME]: [intentFirst] }, BROADCAST_OPTS).ok,
+				false,
+			);
+			assert.equal(
+				broadcastVerdict(BROADCAST_SEEN, { ...BROADCAST_OPTS, bundleId: "ovr-other-0000" }).ok,
+				false,
+			);
+			const none = broadcastVerdict(BROADCAST_SEEN, { ...BROADCAST_OPTS, bundleId: undefined });
+			assert.equal(none.ok, false);
+			assert.match(none.problems.join(), /no bundle id/);
+		},
+	],
+	[
 		"targets: only probe-handoff-* names may be sent to",
 		() => {
 			assert.equal(isProbeTarget("probe-handoff-accept"), true);
 			assert.equal(isProbeTarget("probe-handoff-hold"), true);
+			assert.equal(isProbeTarget("probe-handoff-note"), true);
 			for (const name of [
 				"",
 				"probe-handoff-",
