@@ -7,7 +7,7 @@
 ![Pinned Claude Code](https://img.shields.io/badge/Claude%20Code-2.1.310-555555)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey)
 
-> **Status: first slices (S-01 to S-07).** One hand-off to one live local session, or a short broadcast to several, with an acknowledgement coming back, picked from a session list grouped by project, a status per target that survives a mod reload, and a history of the bundles you sent. The sender runs in the CLI; any local session, Desktop included, can receive.
+> **Status: first slices (S-01 to S-07).** One hand-off to one live local session, or a short broadcast to several, with an acknowledgement coming back, picked from a session list grouped by project, a status per target that survives a mod reload, and a history of the bundles you sent. The sender runs in the CLI and, from a marketplace install, in the Desktop app (permission mode Manual; see "Limits"); any local session, Desktop included, can receive.
 
 **Sections:**
 [About](#about) · [Planned](#planned) · [Requirements](#requirements) · [Installation](#installation) · [Usage](#usage) · [The session list](#the-session-list) · [Composing and cost](#composing-and-cost) · [What leaves your session](#what-leaves-your-session) · [Sent history](#sent-history) · [Bundle format](#bundle-format) · [What "passed on" and "received" mean](#what-passed-on-and-received-mean) · [Known platform behaviour](#known-platform-behaviour) · [Limits](#limits) · [Project structure](#project-structure) · [Development](#development) · [Continuous integration](#continuous-integration) · [Types first](#types-first-rule-for-the-mods-api) · [About this repository](#about-this-repository) · [License](#license)
@@ -63,7 +63,7 @@ This repository is also a plugin marketplace named `cc-over`, with one plugin, a
 /reload-plugins
 ```
 
-The Desktop app has no `--plugin-dir`, so it uses the marketplace install. Desktop as a sender is not verified yet. A Desktop session as a recipient needs no install and was verified on 2026-10-19: it picked the hand-off up and acknowledged it.
+The Desktop app has no `--plugin-dir`, so it uses the marketplace install. Desktop as a sender was verified on 2026-10-25 (Claude Code 2.1.310) from this install, with the session in permission mode Manual: the preview, the send, the status and the acknowledgement all worked. In mode Auto the platform refused the send (see "Limits"). A Desktop session as a recipient needs no install and was verified on 2026-10-19: it picked the hand-off up and acknowledged it.
 
 ## Usage
 
@@ -202,7 +202,7 @@ A `held` send can be settled much later, and the outcome may never reach your se
 - The delivery warning may list only some names. When the platform reports a warning for several recipients at once, it can name only the first few of them, so after a large broadcast some recipients may keep the status `passed on (queued)` although a warning concerned them.
 - Several sends to the same session name share one warning match. A warning counts the messages but names the session once, so only one of those sends changes status. `/over --send-repo` also skips by session name, so a second session with the same name as one already sent to is skipped too.
 - Switching a draft from a hand-off to a broadcast after `/over --send` keeps the same bundle. `/over --send-repo` then skips a session that already received it, and `/over --status` titles the group from that first send.
-- The Desktop app is not verified as a sender. As a recipient it works (verified 2026-10-19): the acknowledgement came back to a CLI sender, while the warnings of the table above may not.
+- The Desktop app works as a sender from a marketplace install (verified 2026-10-25, Claude Code 2.1.310) in permission mode Manual. In mode Auto the platform refused the send: `The server-side auto mode classifier gave no verdict for SendMessage`, and the mod shows `not passed on` with that reason; switch the session to Manual and send again. Other modes were not tried, and the same behaviour in the CLI was not measured. As a recipient the Desktop app works (verified 2026-10-19): the acknowledgement came back to a CLI sender, while the warnings of the table above may not.
 
 ## Project structure
 
